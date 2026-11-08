@@ -64,7 +64,13 @@ class WebSocketClient(
 ) {
     val isWriting = AtomicBoolean(false)
     @Volatile var lastActiveMs: Long = System.currentTimeMillis()
+    @Volatile var lastSuccessfulWriteMs: Long = System.currentTimeMillis()
+    @Volatile var droppedFrames: Long = 0L
     @Volatile var isClosed: Boolean = false
+
+    fun recordDroppedFrame() {
+        droppedFrames++
+    }
 
     fun sendFrame(frameBytes: ByteArray): Boolean {
         if (isClosed || socket.isClosed) return false
@@ -73,7 +79,37 @@ class WebSocketClient(
                 outputStream.write(frameBytes)
                 outputStream.flush()
             }
-            lastActiveMs = System.currentTimeMillis()
+            lastSuccessfulWriteMs = System.currentTimeMillis()
+            lastActiveMs = lastSuccessfulWriteMs
+            true
+        } catch (_: Exception) {
+            close()
+            false
+        }
+    }
+
+    /**
+     * Zero-copy transmission of video frames:
+     * Writes frame header (22-28 bytes) and JPEG payload directly to outputStream
+     * without allocating or copying an intermediate full-frame byte array.
+     */
+    fun sendVideoFrame(
+        headerBytes: ByteArray,
+        headerOffset: Int,
+        headerLen: Int,
+        jpegBytes: ByteArray,
+        jpegOffset: Int = 0,
+        jpegLen: Int = jpegBytes.size
+    ): Boolean {
+        if (isClosed || socket.isClosed) return false
+        return try {
+            synchronized(outputStream) {
+                outputStream.write(headerBytes, headerOffset, headerLen)
+                outputStream.write(jpegBytes, jpegOffset, jpegLen)
+                outputStream.flush()
+            }
+            lastSuccessfulWriteMs = System.currentTimeMillis()
+            lastActiveMs = lastSuccessfulWriteMs
             true
         } catch (_: Exception) {
             close()
@@ -152,6 +188,7 @@ class BinaryWebSocketHelper(
         const val OPCODE_PONG = 0x0A
 
         const val VIDEO_HEADER_SIZE = 18
+        const val MAX_HEADER_SIZE = 28 // 10B WS header + 18B Video header
 
         /**
          * Computes the Sec-WebSocket-Accept key according to RFC 6455 section 1.3:
@@ -220,7 +257,7 @@ class BinaryWebSocketHelper(
                 """ws.onmessage=e=>{""" +
                 """if(e.data.byteLength>18){""" +
                 """const jpeg=e.data.slice(18);""" +
-                """createImageBitmap(new Blob([jpeg],{type:'image/jpeg'})).then(bmp=>{""" +
+                """createImageBitmap(new Blob([jpeg],{type:'image/jpeg'}),{premultiplyAlpha:'none',colorSpaceConversion:'none'}).then(bmp=>{""" +
                 """if(canvas.width!==bmp.width||canvas.height!==bmp.height){canvas.width=bmp.width;canvas.height=bmp.height;}""" +
                 """ctx.drawImage(bmp,0,0);bmp.close();""" +
                 """}).catch(()=>{});}};""" +
@@ -238,7 +275,7 @@ class BinaryWebSocketHelper(
         }
 
         /**
-         * Constructs an unmasked RFC 6455 frame header (Server -> Client).
+         * Constructs an unmasked RFC 6455 frame header (Server -> Client) without ByteBuffer allocation.
          */
         fun buildFrameHeader(payloadLength: Long, opcode: Int = OPCODE_BINARY, fin: Boolean = true): ByteArray {
             val b0 = ((if (fin) 0x80 else 0x00) or (opcode and 0x0F)).toByte()
@@ -247,18 +284,26 @@ class BinaryWebSocketHelper(
                     byteArrayOf(b0, (payloadLength and 0x7F).toByte())
                 }
                 payloadLength <= 65535L -> {
-                    val bb = ByteBuffer.allocate(4).order(ByteOrder.BIG_ENDIAN)
-                    bb.put(b0)
-                    bb.put(126.toByte())
-                    bb.putShort(payloadLength.toShort())
-                    bb.array()
+                    byteArrayOf(
+                        b0,
+                        126.toByte(),
+                        (payloadLength ushr 8).toByte(),
+                        (payloadLength and 0xFF).toByte()
+                    )
                 }
                 else -> {
-                    val bb = ByteBuffer.allocate(10).order(ByteOrder.BIG_ENDIAN)
-                    bb.put(b0)
-                    bb.put(127.toByte())
-                    bb.putLong(payloadLength)
-                    bb.array()
+                    byteArrayOf(
+                        b0,
+                        127.toByte(),
+                        (payloadLength ushr 56).toByte(),
+                        (payloadLength ushr 48).toByte(),
+                        (payloadLength ushr 40).toByte(),
+                        (payloadLength ushr 32).toByte(),
+                        (payloadLength ushr 24).toByte(),
+                        (payloadLength ushr 16).toByte(),
+                        (payloadLength ushr 8).toByte(),
+                        (payloadLength and 0xFF).toByte()
+                    )
                 }
             }
         }
@@ -268,25 +313,124 @@ class BinaryWebSocketHelper(
          * [Timestamp 8B][FrameIndex 4B][Flags 2B][PayloadLength 4B]
          */
         fun buildVideoHeader(timestamp: Long, frameIndex: Int, flags: Short, payloadLength: Int): ByteArray {
-            val bb = ByteBuffer.allocate(VIDEO_HEADER_SIZE).order(ByteOrder.BIG_ENDIAN)
-            bb.putLong(timestamp)
-            bb.putInt(frameIndex)
-            bb.putShort(flags)
-            bb.putInt(payloadLength)
-            return bb.array()
+            val out = ByteArray(VIDEO_HEADER_SIZE)
+            out[0] = (timestamp ushr 56).toByte()
+            out[1] = (timestamp ushr 48).toByte()
+            out[2] = (timestamp ushr 40).toByte()
+            out[3] = (timestamp ushr 32).toByte()
+            out[4] = (timestamp ushr 24).toByte()
+            out[5] = (timestamp ushr 16).toByte()
+            out[6] = (timestamp ushr 8).toByte()
+            out[7] = (timestamp and 0xFF).toByte()
+
+            out[8] = (frameIndex ushr 24).toByte()
+            out[9] = (frameIndex ushr 16).toByte()
+            out[10] = (frameIndex ushr 8).toByte()
+            out[11] = (frameIndex and 0xFF).toByte()
+
+            out[12] = (flags.toInt() ushr 8).toByte()
+            out[13] = (flags.toInt() and 0xFF).toByte()
+
+            out[14] = (payloadLength ushr 24).toByte()
+            out[15] = (payloadLength ushr 16).toByte()
+            out[16] = (payloadLength ushr 8).toByte()
+            out[17] = (payloadLength and 0xFF).toByte()
+            return out
         }
 
         /**
-         * Decodes an 18-byte video header from byte array.
+         * Decodes an 18-byte video header from byte array using direct bit shifts.
          */
         fun parseVideoHeader(bytes: ByteArray, offset: Int = 0): VideoHeader {
             require(bytes.size - offset >= VIDEO_HEADER_SIZE) { "Buffer too short for video header" }
-            val bb = ByteBuffer.wrap(bytes, offset, VIDEO_HEADER_SIZE).order(ByteOrder.BIG_ENDIAN)
-            val ts = bb.long
-            val idx = bb.int
-            val flags = bb.short
-            val len = bb.int
-            return VideoHeader(ts, idx, flags, len)
+            var idx = offset
+            val ts = ((bytes[idx++].toLong() and 0xFF) shl 56) or
+                    ((bytes[idx++].toLong() and 0xFF) shl 48) or
+                    ((bytes[idx++].toLong() and 0xFF) shl 40) or
+                    ((bytes[idx++].toLong() and 0xFF) shl 32) or
+                    ((bytes[idx++].toLong() and 0xFF) shl 24) or
+                    ((bytes[idx++].toLong() and 0xFF) shl 16) or
+                    ((bytes[idx++].toLong() and 0xFF) shl 8) or
+                    (bytes[idx++].toLong() and 0xFF)
+
+            val frameIndex = ((bytes[idx++].toInt() and 0xFF) shl 24) or
+                    ((bytes[idx++].toInt() and 0xFF) shl 16) or
+                    ((bytes[idx++].toInt() and 0xFF) shl 8) or
+                    (bytes[idx++].toInt() and 0xFF)
+
+            val flags = (((bytes[idx++].toInt() and 0xFF) shl 8) or
+                    (bytes[idx++].toInt() and 0xFF)).toShort()
+
+            val payloadLength = ((bytes[idx++].toInt() and 0xFF) shl 24) or
+                    ((bytes[idx++].toInt() and 0xFF) shl 16) or
+                    ((bytes[idx++].toInt() and 0xFF) shl 8) or
+                    (bytes[idx++].toInt() and 0xFF)
+
+            return VideoHeader(ts, frameIndex, flags, payloadLength)
+        }
+
+        /**
+         * Writes both the RFC 6455 frame header and the 18-byte video header
+         * into [out] at [offset] in a single pass with zero heap allocation.
+         * Returns total header bytes written (20, 22, or 28 bytes).
+         */
+        fun writeVideoHeaderAndFrameHeader(
+            out: ByteArray,
+            offset: Int,
+            jpegSize: Int,
+            timestamp: Long,
+            frameIndex: Int,
+            flags: Short
+        ): Int {
+            val totalPayload = VIDEO_HEADER_SIZE.toLong() + jpegSize.toLong()
+            var idx = offset
+            out[idx++] = 0x82.toByte() // FIN | OPCODE_BINARY
+            when {
+                totalPayload <= 125L -> {
+                    out[idx++] = totalPayload.toByte()
+                }
+                totalPayload <= 65535L -> {
+                    out[idx++] = 126.toByte()
+                    out[idx++] = (totalPayload ushr 8).toByte()
+                    out[idx++] = (totalPayload and 0xFF).toByte()
+                }
+                else -> {
+                    out[idx++] = 127.toByte()
+                    out[idx++] = (totalPayload ushr 56).toByte()
+                    out[idx++] = (totalPayload ushr 48).toByte()
+                    out[idx++] = (totalPayload ushr 40).toByte()
+                    out[idx++] = (totalPayload ushr 32).toByte()
+                    out[idx++] = (totalPayload ushr 24).toByte()
+                    out[idx++] = (totalPayload ushr 16).toByte()
+                    out[idx++] = (totalPayload ushr 8).toByte()
+                    out[idx++] = (totalPayload and 0xFF).toByte()
+                }
+            }
+
+            // Video Header (18 bytes)
+            out[idx++] = (timestamp ushr 56).toByte()
+            out[idx++] = (timestamp ushr 48).toByte()
+            out[idx++] = (timestamp ushr 40).toByte()
+            out[idx++] = (timestamp ushr 32).toByte()
+            out[idx++] = (timestamp ushr 24).toByte()
+            out[idx++] = (timestamp ushr 16).toByte()
+            out[idx++] = (timestamp ushr 8).toByte()
+            out[idx++] = (timestamp and 0xFF).toByte()
+
+            out[idx++] = (frameIndex ushr 24).toByte()
+            out[idx++] = (frameIndex ushr 16).toByte()
+            out[idx++] = (frameIndex ushr 8).toByte()
+            out[idx++] = (frameIndex and 0xFF).toByte()
+
+            out[idx++] = (flags.toInt() ushr 8).toByte()
+            out[idx++] = (flags.toInt() and 0xFF).toByte()
+
+            out[idx++] = (jpegSize ushr 24).toByte()
+            out[idx++] = (jpegSize ushr 16).toByte()
+            out[idx++] = (jpegSize ushr 8).toByte()
+            out[idx++] = (jpegSize and 0xFF).toByte()
+
+            return idx - offset
         }
 
         fun buildPongFrame(payload: ByteArray = ByteArray(0)): ByteArray {
@@ -300,13 +444,14 @@ class BinaryWebSocketHelper(
         }
 
         fun buildCloseFrame(statusCode: Short = 1000): ByteArray {
-            val payload = ByteBuffer.allocate(2).order(ByteOrder.BIG_ENDIAN).putShort(statusCode).array()
+            val payload = byteArrayOf((statusCode.toInt() ushr 8).toByte(), (statusCode.toInt() and 0xFF).toByte())
             val header = buildFrameHeader(2, OPCODE_CLOSE, true)
             return header + payload
         }
 
         /**
          * Encodes a complete RFC 6455 binary frame containing the video header and JPEG payload.
+         * Single-array allocation with zero intermediate buffers.
          */
         fun encodeVideoFrameMessage(
             jpegBytes: ByteArray,
@@ -314,13 +459,22 @@ class BinaryWebSocketHelper(
             frameIndex: Int,
             flags: Short = 0
         ): ByteArray {
-            val totalPayloadSize = VIDEO_HEADER_SIZE + jpegBytes.size
-            val frameHeader = buildFrameHeader(totalPayloadSize.toLong(), OPCODE_BINARY, true)
-            val videoHeader = buildVideoHeader(timestamp, frameIndex, flags, jpegBytes.size)
-            val result = ByteArray(frameHeader.size + VIDEO_HEADER_SIZE + jpegBytes.size)
-            System.arraycopy(frameHeader, 0, result, 0, frameHeader.size)
-            System.arraycopy(videoHeader, 0, result, frameHeader.size, VIDEO_HEADER_SIZE)
-            System.arraycopy(jpegBytes, 0, result, frameHeader.size + VIDEO_HEADER_SIZE, jpegBytes.size)
+            val totalPayload = VIDEO_HEADER_SIZE.toLong() + jpegBytes.size.toLong()
+            val frameHeaderLen = when {
+                totalPayload <= 125L -> 2
+                totalPayload <= 65535L -> 4
+                else -> 10
+            }
+            val result = ByteArray(frameHeaderLen + VIDEO_HEADER_SIZE + jpegBytes.size)
+            val headerLen = writeVideoHeaderAndFrameHeader(
+                out = result,
+                offset = 0,
+                jpegSize = jpegBytes.size,
+                timestamp = timestamp,
+                frameIndex = frameIndex,
+                flags = flags
+            )
+            System.arraycopy(jpegBytes, 0, result, headerLen, jpegBytes.size)
             return result
         }
 
@@ -391,14 +545,14 @@ class BinaryWebSocketHelper(
     private val secFrameCounter = AtomicInteger(0)
 
     private val writerExecutor: ExecutorService = ThreadPoolExecutor(
-        2,
+        4,
         16,
         30L,
         TimeUnit.SECONDS,
         SynchronousQueue(),
         { runnable -> Thread(runnable, "WebSocketBroadcaster").apply { isDaemon = true } },
         ThreadPoolExecutor.DiscardPolicy()
-    )
+    ).apply { allowCoreThreadTimeOut(true) }
 
     fun getClients(): List<WebSocketClient> = clients.toList()
     fun hasClients(): Boolean = clients.isNotEmpty()
@@ -443,25 +597,37 @@ class BinaryWebSocketHelper(
         if (activeClients.isEmpty()) return
 
         val frameIndex = if (channel == "primary") frameCounter.getAndIncrement() else secFrameCounter.getAndIncrement()
-        val messageBytes = encodeVideoFrameMessage(jpegBytes, timestamp, frameIndex, flags)
+
+        // Zero-copy buffer reuse: write 22-28 byte header once into a compact byte array
+        val tempHeader = ByteArray(MAX_HEADER_SIZE)
+        val headerLen = writeVideoHeaderAndFrameHeader(
+            out = tempHeader,
+            offset = 0,
+            jpegSize = jpegBytes.size,
+            timestamp = timestamp,
+            frameIndex = frameIndex,
+            flags = flags
+        )
+        val headerBytes = tempHeader.copyOf(headerLen)
 
         for (client in activeClients) {
             if (client.isClosed || client.socket.isClosed) {
                 removeClient(client)
                 continue
             }
+            if (SocketTuningHelper.shouldDropFrame(client)) {
+                client.recordDroppedFrame()
+                continue
+            }
             if (!client.isWriting.compareAndSet(false, true)) {
+                client.recordDroppedFrame()
                 continue
             }
             try {
                 writerExecutor.execute {
                     try {
                         if (!client.isClosed && !client.socket.isClosed) {
-                            synchronized(client.outputStream) {
-                                client.outputStream.write(messageBytes)
-                                client.outputStream.flush()
-                            }
-                            client.lastActiveMs = System.currentTimeMillis()
+                            client.sendVideoFrame(headerBytes, 0, headerLen, jpegBytes, 0, jpegBytes.size)
                         }
                     } catch (e: Exception) {
                         client.close()
@@ -471,6 +637,7 @@ class BinaryWebSocketHelper(
                     }
                 }
             } catch (e: RejectedExecutionException) {
+                client.recordDroppedFrame()
                 client.isWriting.set(false)
             }
         }

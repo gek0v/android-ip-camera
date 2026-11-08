@@ -300,5 +300,88 @@ class NativeImagePipelineTest {
         val result2 = NativeImagePipeline.convertYuv420ToNv21(proxy, reuse)
         assertTrue(reuse === result2)
     }
+
+    @Test
+    fun testRotateNV21AllAngles() {
+        val width = 4
+        val height = 2
+        // Frame:
+        // Y:
+        // 1, 2, 3, 4
+        // 5, 6, 7, 8
+        // UV (1 row of 2 pairs: [V0, U0, V1, U1]):
+        // 10, 11, 12, 13
+        val src = byteArrayOf(
+            1, 2, 3, 4,
+            5, 6, 7, 8,
+            10, 11, 12, 13
+        )
+        val dest = ByteArray(src.size)
+
+        // 0 degrees
+        val (w0, h0) = rotateNV21(src, width, height, 0, dest)
+        assertEquals(width, w0)
+        assertEquals(height, h0)
+        assertArrayEquals(src, dest)
+
+        // 90 degrees
+        val (w90, h90) = rotateNV21(src, width, height, 90, dest)
+        assertEquals(height, w90)
+        assertEquals(width, h90)
+        val expected90 = byteArrayOf(
+            5, 1,
+            6, 2,
+            7, 3,
+            8, 4,
+            10, 11,
+            12, 13
+        )
+        assertArrayEquals(expected90, dest)
+
+        // 180 degrees
+        val (w180, h180) = rotateNV21(src, width, height, 180, dest)
+        assertEquals(width, w180)
+        assertEquals(height, h180)
+        val expected180 = byteArrayOf(
+            8, 7, 6, 5,
+            4, 3, 2, 1,
+            12, 13, 10, 11
+        )
+        assertArrayEquals(expected180, dest)
+
+        // 270 degrees
+        val (w270, h270) = rotateNV21(src, width, height, 270, dest)
+        assertEquals(height, w270)
+        assertEquals(width, h270)
+        val expected270 = byteArrayOf(
+            4, 8,
+            3, 7,
+            2, 6,
+            1, 5,
+            12, 13,
+            10, 11
+        )
+        assertArrayEquals(expected270, dest)
+    }
+
+    @Test
+    fun testMirrorNV21() {
+        val width = 4
+        val height = 2
+        val src = byteArrayOf(
+            1, 2, 3, 4,
+            5, 6, 7, 8,
+            10, 11, 12, 13
+        )
+        val dest = ByteArray(src.size)
+        mirrorNV21(src, width, height, dest)
+
+        val expected = byteArrayOf(
+            4, 3, 2, 1,
+            8, 7, 6, 5,
+            12, 13, 10, 11
+        )
+        assertArrayEquals(expected, dest)
+    }
 }
 

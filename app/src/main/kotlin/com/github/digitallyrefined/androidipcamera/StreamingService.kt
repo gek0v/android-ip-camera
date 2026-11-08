@@ -518,10 +518,13 @@ class StreamingService : LifecycleService() {
     }
 
     private fun startCameraXBackend(want: Size) {
+        val prefs = PreferenceManager.getDefaultSharedPreferences(this)
+        val targetFps = prefs.getString("stream_fps", "60")?.toIntOrNull()?.coerceIn(1, 120) ?: 60
         val showScreenPreview = !encoders.any { it.hasClients() } && currentSurfaceProvider != null
         val cx = CameraXCapture(
             this, this, frontFacing, selectedCameraId, want,
-            if (showScreenPreview) currentSurfaceProvider else null
+            if (showScreenPreview) currentSurfaceProvider else null,
+            targetFps = targetFps
         ) { img ->
             try {
                 motionMonitor?.processFrame(img)
@@ -535,15 +538,29 @@ class StreamingService : LifecycleService() {
             } finally {
                 img.close()
             }
-        }.also {
-            it.setPipFrameCallback { nv21, w, h ->
+        }.also { capture ->
+            capture.setNv21FrameCallback { nv21, w, h, timestampNs ->
+                try {
+                    motionMonitor?.processNv21Frame(nv21, w, h)
+                    if (mjpegStreamingEncoder?.hasClients() == true) {
+                        mjpegStreamingEncoder?.processNv21FrameWithTimestamp(nv21, w, h, timestampNs)
+                    }
+                } catch (e: OutOfMemoryError) {
+                    Log.e(TAG, "NV21 dispatch OOM: ${e.message}")
+                    DeviceMemoryHelper.updateMemoryPressure(android.content.ComponentCallbacks2.TRIM_MEMORY_RUNNING_CRITICAL)
+                    try { System.gc() } catch (_: Exception) {}
+                } catch (e: Throwable) {
+                    Log.e(TAG, "NV21 dispatch error: ${e.message}")
+                }
+            }
+            capture.setPipFrameCallback { nv21, w, h ->
                 mjpegStreamingEncoder?.updatePipFrame(nv21, w, h)
             }
-            it.start()
+            capture.start()
         }
         backend = cx
         applyStored(cx)
-        Log.i(TAG, "stream ${camId()} api=camerax")
+        Log.i(TAG, "stream ${camId()} api=camerax targetFps=$targetFps")
     }
 
     private fun stopCamera() {
@@ -1009,7 +1026,7 @@ class StreamingService : LifecycleService() {
             }
             "fps" -> {
                 val fps = value.toIntOrNull()
-                if (fps != null && fps in 1..60) {
+                if (fps != null && fps in 1..120) {
                     prefs.edit().putString("stream_fps", fps.toString()).apply()
                 }
             }

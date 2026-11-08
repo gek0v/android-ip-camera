@@ -147,6 +147,175 @@ static inline bool convertPlanesInternal(
     return true;
 }
 
+// 90 degrees clockwise rotation
+static void rotateNV21_90(const uint8_t* src, uint8_t* dst, int32_t width, int32_t height) {
+    const int32_t frame_size = width * height;
+    const int32_t dst_width = height;
+
+    constexpr int32_t TILE = 32;
+    for (int32_t tj = 0; tj < height; tj += TILE) {
+        int32_t t_height = std::min(TILE, height - tj);
+        for (int32_t ti = 0; ti < width; ti += TILE) {
+            int32_t t_width = std::min(TILE, width - ti);
+            for (int32_t j = 0; j < t_height; ++j) {
+                int32_t src_y = tj + j;
+                const uint8_t* src_row = src + src_y * width + ti;
+                int32_t dst_x = height - 1 - src_y;
+                for (int32_t i = 0; i < t_width; ++i) {
+                    int32_t dst_y = ti + i;
+                    dst[dst_y * dst_width + dst_x] = src_row[i];
+                }
+            }
+        }
+    }
+
+    const int32_t uv_width = width / 2;
+    const int32_t uv_height = height / 2;
+    const int32_t dst_uv_width = height / 2;
+    const uint16_t* src_uv = reinterpret_cast<const uint16_t*>(src + frame_size);
+    uint16_t* dst_uv = reinterpret_cast<uint16_t*>(dst + frame_size);
+
+    constexpr int32_t UV_TILE = 16;
+    for (int32_t tj = 0; tj < uv_height; tj += UV_TILE) {
+        int32_t t_height = std::min(UV_TILE, uv_height - tj);
+        for (int32_t ti = 0; ti < uv_width; ti += UV_TILE) {
+            int32_t t_width = std::min(UV_TILE, uv_width - ti);
+            for (int32_t j = 0; j < t_height; ++j) {
+                int32_t src_y = tj + j;
+                const uint16_t* src_row = src_uv + src_y * uv_width + ti;
+                int32_t dst_x = uv_height - 1 - src_y;
+                for (int32_t i = 0; i < t_width; ++i) {
+                    int32_t dst_y = ti + i;
+                    dst_uv[dst_y * dst_uv_width + dst_x] = src_row[i];
+                }
+            }
+        }
+    }
+}
+
+// 180 degrees rotation (ARM NEON accelerated vector reversal)
+static void rotateNV21_180(const uint8_t* src, uint8_t* dst, int32_t width, int32_t height) {
+    const int32_t frame_size = width * height;
+    int32_t i = 0;
+#if defined(__ARM_NEON) || defined(__ARM_NEON__)
+    for (; i <= frame_size - 16; i += 16) {
+        uint8x16_t chunk = vld1q_u8(src + (frame_size - 16 - i));
+        uint8x16_t rev = vrev64q_u8(chunk);
+        uint8x16_t out = vcombine_u8(vget_high_u8(rev), vget_low_u8(rev));
+        vst1q_u8(dst + i, out);
+    }
+#endif
+    for (; i < frame_size; ++i) {
+        dst[i] = src[frame_size - 1 - i];
+    }
+
+    const int32_t total_pairs = frame_size / 4;
+    const uint16_t* src_uv = reinterpret_cast<const uint16_t*>(src + frame_size);
+    uint16_t* dst_uv = reinterpret_cast<uint16_t*>(dst + frame_size);
+    int32_t p = 0;
+#if defined(__ARM_NEON) || defined(__ARM_NEON__)
+    for (; p <= total_pairs - 8; p += 8) {
+        uint16x8_t chunk = vld1q_u16(src_uv + (total_pairs - 8 - p));
+        uint16x8_t rev = vrev64q_u16(chunk);
+        uint16x8_t out = vcombine_u16(vget_high_u16(rev), vget_low_u16(rev));
+        vst1q_u16(dst_uv + p, out);
+    }
+#endif
+    for (; p < total_pairs; ++p) {
+        dst_uv[p] = src_uv[total_pairs - 1 - p];
+    }
+}
+
+// 270 degrees clockwise rotation
+static void rotateNV21_270(const uint8_t* src, uint8_t* dst, int32_t width, int32_t height) {
+    const int32_t frame_size = width * height;
+    const int32_t dst_width = height;
+
+    constexpr int32_t TILE = 32;
+    for (int32_t tj = 0; tj < height; tj += TILE) {
+        int32_t t_height = std::min(TILE, height - tj);
+        for (int32_t ti = 0; ti < width; ti += TILE) {
+            int32_t t_width = std::min(TILE, width - ti);
+            for (int32_t j = 0; j < t_height; ++j) {
+                int32_t src_y = tj + j;
+                const uint8_t* src_row = src + src_y * width + ti;
+                int32_t dst_x = src_y;
+                for (int32_t i = 0; i < t_width; ++i) {
+                    int32_t dst_y = width - 1 - (ti + i);
+                    dst[dst_y * dst_width + dst_x] = src_row[i];
+                }
+            }
+        }
+    }
+
+    const int32_t uv_width = width / 2;
+    const int32_t uv_height = height / 2;
+    const int32_t dst_uv_width = height / 2;
+    const uint16_t* src_uv = reinterpret_cast<const uint16_t*>(src + frame_size);
+    uint16_t* dst_uv = reinterpret_cast<uint16_t*>(dst + frame_size);
+
+    constexpr int32_t UV_TILE = 16;
+    for (int32_t tj = 0; tj < uv_height; tj += UV_TILE) {
+        int32_t t_height = std::min(UV_TILE, uv_height - tj);
+        for (int32_t ti = 0; ti < uv_width; ti += UV_TILE) {
+            int32_t t_width = std::min(UV_TILE, uv_width - ti);
+            for (int32_t j = 0; j < t_height; ++j) {
+                int32_t src_y = tj + j;
+                const uint16_t* src_row = src_uv + src_y * uv_width + ti;
+                int32_t dst_x = src_y;
+                for (int32_t i = 0; i < t_width; ++i) {
+                    int32_t dst_y = uv_width - 1 - (ti + i);
+                    dst_uv[dst_y * dst_uv_width + dst_x] = src_row[i];
+                }
+            }
+        }
+    }
+}
+
+// Horizontal mirror (ARM NEON accelerated row reversal)
+static void mirrorNV21_internal(const uint8_t* src, uint8_t* dst, int32_t width, int32_t height) {
+    const int32_t frame_size = width * height;
+
+    for (int32_t r = 0; r < height; ++r) {
+        const uint8_t* src_row = src + r * width;
+        uint8_t* dst_row = dst + r * width;
+        int32_t c = 0;
+#if defined(__ARM_NEON) || defined(__ARM_NEON__)
+        for (; c <= width - 16; c += 16) {
+            uint8x16_t chunk = vld1q_u8(src_row + c);
+            uint8x16_t rev = vrev64q_u8(chunk);
+            uint8x16_t out = vcombine_u8(vget_high_u8(rev), vget_low_u8(rev));
+            vst1q_u8(dst_row + (width - 16 - c), out);
+        }
+#endif
+        for (; c < width; ++c) {
+            dst_row[width - 1 - c] = src_row[c];
+        }
+    }
+
+    const int32_t uv_width = width / 2;
+    const int32_t uv_height = height / 2;
+    const uint16_t* src_uv = reinterpret_cast<const uint16_t*>(src + frame_size);
+    uint16_t* dst_uv = reinterpret_cast<uint16_t*>(dst + frame_size);
+
+    for (int32_t r = 0; r < uv_height; ++r) {
+        const uint16_t* src_row = src_uv + r * uv_width;
+        uint16_t* dst_row = dst_uv + r * uv_width;
+        int32_t c = 0;
+#if defined(__ARM_NEON) || defined(__ARM_NEON__)
+        for (; c <= uv_width - 8; c += 8) {
+            uint16x8_t chunk = vld1q_u16(src_row + c);
+            uint16x8_t rev = vrev64q_u16(chunk);
+            uint16x8_t out = vcombine_u16(vget_high_u16(rev), vget_low_u16(rev));
+            vst1q_u16(dst_row + (uv_width - 8 - c), out);
+        }
+#endif
+        for (; c < uv_width; ++c) {
+            dst_row[uv_width - 1 - c] = src_row[c];
+        }
+    }
+}
+
 struct BufferHolder {
     const uint8_t* ptr = nullptr;
     jbyteArray array = nullptr;
@@ -300,6 +469,95 @@ Java_com_github_digitallyrefined_androidipcamera_helpers_NativeImagePipeline_nat
     releaseSourceBuffer(env, v_hold);
 
     return ok ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_github_digitallyrefined_androidipcamera_helpers_NativeImagePipeline_nativeRotateNV21(
+    JNIEnv* env,
+    jclass clazz,
+    jbyteArray src_arr,
+    jbyteArray dst_arr,
+    jint width,
+    jint height,
+    jint rotation
+) {
+    if (!src_arr || !dst_arr) return JNI_FALSE;
+    if (width <= 0 || height <= 0 || (width & 1) != 0 || (height & 1) != 0) return JNI_FALSE;
+
+    jsize src_len = env->GetArrayLength(src_arr);
+    jsize dst_len = env->GetArrayLength(dst_arr);
+    jsize req_size = static_cast<jsize>(width) * height * 3 / 2;
+    if (src_len < req_size || dst_len < req_size) return JNI_FALSE;
+
+    jbyte* src = static_cast<jbyte*>(env->GetPrimitiveArrayCritical(src_arr, nullptr));
+    if (!src) return JNI_FALSE;
+    jbyte* dst = static_cast<jbyte*>(env->GetPrimitiveArrayCritical(dst_arr, nullptr));
+    if (!dst) {
+        env->ReleasePrimitiveArrayCritical(src_arr, src, JNI_ABORT);
+        return JNI_FALSE;
+    }
+
+    int32_t norm = ((rotation % 360) + 360) % 360;
+    const uint8_t* u_src = reinterpret_cast<const uint8_t*>(src);
+    uint8_t* u_dst = reinterpret_cast<uint8_t*>(dst);
+
+    switch (norm) {
+        case 0:
+            std::memcpy(u_dst, u_src, req_size);
+            break;
+        case 90:
+            rotateNV21_90(u_src, u_dst, width, height);
+            break;
+        case 180:
+            rotateNV21_180(u_src, u_dst, width, height);
+            break;
+        case 270:
+            rotateNV21_270(u_src, u_dst, width, height);
+            break;
+        default:
+            std::memcpy(u_dst, u_src, req_size);
+            break;
+    }
+
+    env->ReleasePrimitiveArrayCritical(dst_arr, dst, 0);
+    env->ReleasePrimitiveArrayCritical(src_arr, src, JNI_ABORT);
+    return JNI_TRUE;
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_github_digitallyrefined_androidipcamera_helpers_NativeImagePipeline_nativeMirrorNV21(
+    JNIEnv* env,
+    jclass clazz,
+    jbyteArray src_arr,
+    jbyteArray dst_arr,
+    jint width,
+    jint height
+) {
+    if (!src_arr || !dst_arr) return JNI_FALSE;
+    if (width <= 0 || height <= 0 || (width & 1) != 0 || (height & 1) != 0) return JNI_FALSE;
+
+    jsize src_len = env->GetArrayLength(src_arr);
+    jsize dst_len = env->GetArrayLength(dst_arr);
+    jsize req_size = static_cast<jsize>(width) * height * 3 / 2;
+    if (src_len < req_size || dst_len < req_size) return JNI_FALSE;
+
+    jbyte* src = static_cast<jbyte*>(env->GetPrimitiveArrayCritical(src_arr, nullptr));
+    if (!src) return JNI_FALSE;
+    jbyte* dst = static_cast<jbyte*>(env->GetPrimitiveArrayCritical(dst_arr, nullptr));
+    if (!dst) {
+        env->ReleasePrimitiveArrayCritical(src_arr, src, JNI_ABORT);
+        return JNI_FALSE;
+    }
+
+    mirrorNV21_internal(
+        reinterpret_cast<const uint8_t*>(src),
+        reinterpret_cast<uint8_t*>(dst),
+        width, height
+    );
+
+    env->ReleasePrimitiveArrayCritical(dst_arr, dst, 0);
+    env->ReleasePrimitiveArrayCritical(src_arr, src, JNI_ABORT);
+    return JNI_TRUE;
 }
 
 }

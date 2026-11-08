@@ -21,6 +21,39 @@ object SocketTuningHelper {
     @Volatile var osPollOutChecker: ((FileDescriptor) -> Boolean)? = null
     @Volatile var fdExtractor: ((Socket) -> FileDescriptor?)? = null
 
+    // Cached reflection for android.system.Os.poll to avoid reflection lookup per frame
+    private var osClass: Class<*>? = null
+    private var osConstantsClass: Class<*>? = null
+    private var structPollfdClass: Class<*>? = null
+    private var pollMethod: Method? = null
+    private var fdField: Field? = null
+    private var eventsField: Field? = null
+    private var reventsField: Field? = null
+    private var polloutValue: Short = 4
+    @Volatile private var pollReflectionInitialized = false
+
+    private fun initPollReflection() {
+        if (pollReflectionInitialized) return
+        pollReflectionInitialized = true
+        try {
+            val os = Class.forName("android.system.Os")
+            val constants = Class.forName("android.system.OsConstants")
+            val pollout = (constants.getField("POLLOUT").get(null) as? Number)?.toShort() ?: 4
+            val pfdClass = Class.forName("android.system.StructPollfd")
+            val pollArrayClass = java.lang.reflect.Array.newInstance(pfdClass, 0).javaClass
+            val method = os.getMethod("poll", pollArrayClass, Int::class.javaPrimitiveType)
+
+            osClass = os
+            osConstantsClass = constants
+            polloutValue = pollout
+            structPollfdClass = pfdClass
+            pollMethod = method
+            fdField = pfdClass.getField("fd")
+            eventsField = pfdClass.getField("events")
+            reventsField = pfdClass.getField("revents")
+        } catch (_: Throwable) {}
+    }
+
     fun resetTestingHooks() {
         sdkIntProvider = { Build.VERSION.SDK_INT }
         osSetsockoptIntInvoker = null
@@ -150,24 +183,20 @@ object SocketTuningHelper {
         }
 
         val fd = extractFileDescriptor(socket) ?: return true
+        initPollReflection()
+        val method = pollMethod ?: return true
+        val pfdClass = structPollfdClass ?: return true
         return try {
-            val osClass = Class.forName("android.system.Os")
-            val osConstantsClass = Class.forName("android.system.OsConstants")
-            val polloutField = osConstantsClass.getField("POLLOUT")
-            val polloutValue = (polloutField.get(null) as Number).toShort()
+            val pfd = pfdClass.getDeclaredConstructor().newInstance()
+            fdField?.set(pfd, fd)
+            eventsField?.setShort(pfd, polloutValue)
 
-            val structPollfdClass = Class.forName("android.system.StructPollfd")
-            val pfd = structPollfdClass.getDeclaredConstructor().newInstance()
-            structPollfdClass.getField("fd").set(pfd, fd)
-            structPollfdClass.getField("events").setShort(pfd, polloutValue)
-
-            val pollArray = java.lang.reflect.Array.newInstance(structPollfdClass, 1)
+            val pollArray = java.lang.reflect.Array.newInstance(pfdClass, 1)
             java.lang.reflect.Array.set(pollArray, 0, pfd)
 
-            val pollMethod = osClass.getMethod("poll", pollArray.javaClass, Int::class.javaPrimitiveType)
-            val rc = pollMethod.invoke(null, pollArray, 0) as Int
+            val rc = method.invoke(null, pollArray, 0) as Int
             if (rc > 0) {
-                val revents = structPollfdClass.getField("revents").getShort(pfd).toInt()
+                val revents = reventsField?.getShort(pfd)?.toInt() ?: 0
                 (revents and polloutValue.toInt()) != 0
             } else {
                 false
@@ -202,6 +231,8 @@ object SocketTuningHelper {
         if (customChecker != null) {
             val fd = extractFileDescriptor(socket) ?: FileDescriptor()
             if (!customChecker(fd)) return true
+        } else {
+            if (!isSocketBufferReadyForWrite(socket)) return true
         }
 
         return false
@@ -232,6 +263,20 @@ object SocketTuningHelper {
             socket = client.socket,
             lastSuccessfulWriteMs = client.lastSuccessfulWriteMs,
             isWriting = client.isWriting,
+            nowMs = nowMs,
+            congestionThresholdMs = congestionThresholdMs
+        )
+    }
+
+    fun shouldDropFrame(
+        client: WebSocketClient,
+        nowMs: Long = System.currentTimeMillis(),
+        congestionThresholdMs: Long = DEFAULT_CONGESTION_TIMEOUT_MS
+    ): Boolean {
+        return shouldDropFrame(
+            socket = client.socket,
+            lastSuccessfulWriteMs = client.lastSuccessfulWriteMs,
+            isWriting = client.isWriting.get(),
             nowMs = nowMs,
             congestionThresholdMs = congestionThresholdMs
         )

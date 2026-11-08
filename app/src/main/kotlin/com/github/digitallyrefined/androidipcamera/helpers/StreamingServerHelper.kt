@@ -66,21 +66,25 @@ class StreamingServerHelper(
         val connectedAt: Long = System.currentTimeMillis(),
         val isAuthenticated: Boolean = false,
         @Volatile var lastSuccessfulWriteMs: Long = System.currentTimeMillis(),
-        @Volatile var isWriting: Boolean = false,
-        @Volatile var droppedFrames: Long = 0L,
         val streamChannel: String = "primary"
     ) {
-        fun markWriteStart() {
-            isWriting = true
-        }
+        val isWritingAtomic = java.util.concurrent.atomic.AtomicBoolean(false)
+        var isWriting: Boolean
+            get() = isWritingAtomic.get()
+            set(value) {
+                isWritingAtomic.set(value)
+            }
+        @Volatile var droppedFrames: Long = 0L
+
+        fun markWriteStart(): Boolean = isWritingAtomic.compareAndSet(false, true)
 
         fun markWriteEnd() {
-            isWriting = false
+            isWritingAtomic.set(false)
         }
 
         fun markWriteSuccess() {
             lastSuccessfulWriteMs = System.currentTimeMillis()
-            isWriting = false
+            isWritingAtomic.set(false)
         }
 
         fun recordDroppedFrame() {
@@ -1074,10 +1078,16 @@ class StreamingServerHelper(
 
                 if (handleMaxClients(socket, isAuthenticated = enableAuth)) return
 
+                val queryParams = parseQueryParams(uri)
+                val cam = queryParams["cam"]?.lowercase() ?: queryParams["camera"]?.lowercase()
+                val isSec = path.contains("secondary") || path.contains("front") || (cam in listOf("front", "secondary", "sec", "1"))
+                val streamChannel = if (isSec) "secondary" else "primary"
+
+                val tuning = SocketTuningHelper.tuneStreamingSocket(socket)
                 try {
-                    socket.tcpNoDelay = true
                     socket.sendBufferSize = 256 * 1024
                 } catch (_: Exception) {}
+                onLog("WebSocket socket ($streamChannel) tuned for $clientIp: tcpNoDelay=${tuning.tcpNoDelayApplied}, lowat=${tuning.tcpNotSentLowatApplied}")
 
                 val handshakeSuccess = webSocketHelper.handleHandshake(headers, outputStream)
                 if (!handshakeSuccess) {
@@ -1086,11 +1096,6 @@ class StreamingServerHelper(
                     try { socket.close() } catch (_: Exception) {}
                     return
                 }
-
-                val queryParams = parseQueryParams(uri)
-                val cam = queryParams["cam"]?.lowercase() ?: queryParams["camera"]?.lowercase()
-                val isSec = path.contains("secondary") || path.contains("front") || (cam in listOf("front", "secondary", "sec", "1"))
-                val streamChannel = if (isSec) "secondary" else "primary"
 
                 val wsClient = webSocketHelper.registerClient(socket, outputStream, isAuthenticated = enableAuth, channel = streamChannel)
                 try {
@@ -1875,7 +1880,7 @@ class StreamingServerHelper(
             cameraId = cameraId,
             resolution = prefs.getString("camera_resolution", "low") ?: "low",
             streamRes = prefs.getString("stream_res", "auto") ?: "auto",
-            fps = prefs.getString("stream_fps", "30") ?: "30",
+            fps = prefs.getString("stream_fps", "60") ?: "60",
             quality = prefs.getString("stream_quality", "85") ?: "85",
             bitrate = prefs.getString("stream_bitrate", "0") ?: "0",
             focusMode = prefs.getString("focus_mode", "continuous") ?: "continuous",

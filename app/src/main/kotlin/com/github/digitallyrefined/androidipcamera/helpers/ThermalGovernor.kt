@@ -284,7 +284,7 @@ class ThermalGovernor(private val appContext: Context? = null) {
      * - SEVERE: >=50->24, >=30->15, clamped to 15 max
      */
     fun effectiveFps(configuredFps: Int): Int {
-        val fps = configuredFps.coerceIn(1, 60)
+        val fps = configuredFps.coerceIn(1, 120)
         return when (currentState) {
             ThermalState.NORMAL -> fps
             ThermalState.LIGHT_WARM -> when {
