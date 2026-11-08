@@ -462,6 +462,13 @@ class StreamingServerHelper(
             val uri = requestParts[1]
             val path = uri.substringBefore('?')
 
+            if (httpMethod == "OPTIONS") {
+                writer.print("HTTP/1.1 204 No Content\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Headers: *\r\nConnection: close\r\n\r\n")
+                writer.flush()
+                try { socket.close() } catch (_: Exception) {}
+                return
+            }
+
             val secureStorage = SecureStorage(context)
             val rawUsername = secureStorage.getSecureString(SecureStorage.KEY_USERNAME, "") ?: ""
             val rawPassword = secureStorage.getSecureString(SecureStorage.KEY_PASSWORD, "") ?: ""
@@ -518,7 +525,12 @@ class StreamingServerHelper(
                 name.equals("Authorization", ignoreCase = true) && value.startsWith("Basic ", ignoreCase = true)
             }
 
-            if (enableAuth) {
+            val queryParams = parseQueryParams(uri)
+            val queryUser = queryParams["user"] ?: queryParams["username"]
+            val queryPass = queryParams["pass"] ?: queryParams["password"]
+            val hasValidQueryAuth = queryUser != null && queryPass != null && queryUser == username && queryPass == password
+
+            if (enableAuth && !hasValidQueryAuth) {
                 if (authHeaderPair == null) {
                     // Rate limiting ONLY applies to unauthenticated requests
                     if (isRateLimited(clientIp)) {
@@ -880,6 +892,17 @@ class StreamingServerHelper(
                 return
             }
 
+            if (path == "/obs" || path == "/view") {
+                val obsHtml = "<!DOCTYPE html><html><head><meta charset=\"utf-8\"><title>OBS Stream</title><style>html,body{margin:0;padding:0;width:100%;height:100%;background:#000;overflow:hidden;display:flex;align-items:center;justify-content:center;}img{width:100%;height:100%;object-fit:contain;}</style></head><body><img src=\"/video/mjpeg\" alt=\"Stream\"></body></html>"
+                val obsBytes = obsHtml.toByteArray(StandardCharsets.UTF_8)
+                writer.print("HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: " + obsBytes.size + "\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n")
+                writer.flush()
+                outputStream.write(obsBytes)
+                outputStream.flush()
+                try { socket.close() } catch (_: Exception) {}
+                return
+            }
+
             if (path == "/video/mjpeg" || path == "/video" || path == "/mjpeg") {
                 // AUTHENTICATED CONNECTION if auth is enabled - No rate limiting, higher connection limits
                 if (handleMaxClients(socket, isAuthenticated = enableAuth)) return
@@ -895,6 +918,8 @@ class StreamingServerHelper(
                 writer.print("Cache-Control: no-cache, no-store, must-revalidate, max-age=0\r\n")
                 writer.print("Pragma: no-cache\r\n")
                 writer.print("Expires: 0\r\n")
+                writer.print("Access-Control-Allow-Origin: *\r\n")
+                writer.print("Access-Control-Allow-Headers: *\r\n")
                 writer.print("Content-Type: multipart/x-mixed-replace; boundary=frame\r\n\r\n")
                 writer.flush()
 

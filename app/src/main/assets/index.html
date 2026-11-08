@@ -587,8 +587,8 @@
             <button class="btn btn-copy" id="copyStreamBtn" onclick="copyStreamUrl()">📋 Copy</button>
           </div>
           <div class="grid-2">
+            <button class="btn" onclick="copyObsUrl()" title="Copy clean stream link designed for OBS Browser Source">🎥 Copy OBS Link</button>
             <a id="openStreamLink" href="/video/mjpeg" target="_blank" class="btn" style="text-align:center;">↗ Open Stream</a>
-            <button class="btn" onclick="takeSnapshot()">📸 Snapshot</button>
           </div>
         </section>
 
@@ -831,6 +831,16 @@
       if (streamUrlText) streamUrlText.textContent = url;
       const openLink = getEl('openStreamLink');
       if (openLink) openLink.href = url;
+    }
+
+    function copyObsUrl() {
+      const loc = window.location;
+      const url = loc.protocol + "//" + loc.host + "/obs";
+      navigator.clipboard.writeText(url).then(() => {
+        showToast('OBS Browser Link copied to clipboard!');
+      }).catch(() => {
+        prompt('OBS Browser Source URL:', url);
+      });
     }
 
     function copyStreamUrl() {
