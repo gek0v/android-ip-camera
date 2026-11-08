@@ -1068,7 +1068,7 @@ class StreamingServerHelper(
 
                 try {
                     socket.tcpNoDelay = true
-                    socket.sendBufferSize = 64 * 1024
+                    socket.sendBufferSize = 256 * 1024
                 } catch (_: Exception) {}
 
                 val handshakeSuccess = webSocketHelper.handleHandshake(headers, outputStream)
@@ -1125,7 +1125,7 @@ class StreamingServerHelper(
 
                 val tuning = SocketTuningHelper.tuneStreamingSocket(socket)
                 try {
-                    socket.sendBufferSize = 64 * 1024
+                    socket.sendBufferSize = 256 * 1024
                 } catch (_: Exception) {}
                 onLog("Streaming socket tuned for " + clientIp + ": tcpNoDelay=" + tuning.tcpNoDelayApplied + ", lowat=" + tuning.tcpNotSentLowatApplied)
 

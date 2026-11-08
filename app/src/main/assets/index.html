@@ -1176,40 +1176,55 @@
       if (openLink) openLink.href = url;
     }
 
+    function copyToClipboard(text, successMsg) {
+      if (navigator.clipboard && window.isSecureContext) {
+        navigator.clipboard.writeText(text).then(() => {
+          showToast(successMsg || 'Copied to clipboard!');
+        }).catch(() => {
+          fallbackCopyText(text, successMsg);
+        });
+      } else {
+        fallbackCopyText(text, successMsg);
+      }
+    }
+
+    function fallbackCopyText(text, successMsg) {
+      try {
+        const textArea = document.createElement('textarea');
+        textArea.value = text;
+        textArea.style.position = 'fixed';
+        textArea.style.left = '-999999px';
+        textArea.style.top = '-999999px';
+        textArea.setAttribute('readonly', '');
+        document.body.appendChild(textArea);
+        textArea.focus();
+        textArea.select();
+        const successful = document.execCommand('copy');
+        document.body.removeChild(textArea);
+        if (successful) {
+          showToast(successMsg || 'Copied to clipboard!');
+          return;
+        }
+      } catch (err) {}
+      prompt('Copy URL to clipboard (Ctrl+C, Enter):', text);
+    }
+
     function copyObsWsUrl() {
       const loc = window.location;
       const url = loc.protocol + "//" + loc.host + "/ws/obs";
-      navigator.clipboard.writeText(url).then(() => {
-        showToast('OBS WebSocket Link copied to clipboard!');
-      }).catch(() => {
-        prompt('OBS WebSocket Source URL:', url);
-      });
+      copyToClipboard(url, '⚡ OBS WebSocket link copied!');
     }
 
     function copyObsUrl() {
       const loc = window.location;
       const search = loc.search ? loc.search : "";
       const url = loc.protocol + "//" + loc.host + "/obs" + search;
-      navigator.clipboard.writeText(url).then(() => {
-        showToast('OBS Browser Link copied to clipboard!');
-      }).catch(() => {
-        prompt('OBS Browser Source URL:', url);
-      });
+      copyToClipboard(url, '🎥 OBS Browser link copied!');
     }
 
     function copyStreamUrl() {
       const url = getStreamUrl();
-      navigator.clipboard.writeText(url).then(() => {
-        showToast('Stream link copied to clipboard!');
-      }).catch(() => {
-        const input = document.createElement('input');
-        input.value = url;
-        document.body.appendChild(input);
-        input.select();
-        document.execCommand('copy');
-        document.body.removeChild(input);
-        showToast('Stream link copied!');
-      });
+      copyToClipboard(url, '📋 Stream link copied!');
     }
 
     // Toggle Preview
@@ -1245,6 +1260,43 @@
         streamCtx = streamCanvas.getContext('2d', { alpha: false, desynchronized: true });
       }
       return streamCtx;
+    }
+
+    let pendingBitmap = null;
+    let pendingRafId = null;
+    let lastRenderedTimestamp = 0;
+
+    function queueFrameForRender(bmp, timestamp) {
+      if (timestamp && timestamp < lastRenderedTimestamp) {
+        bmp.close();
+        return;
+      }
+      if (timestamp) lastRenderedTimestamp = timestamp;
+
+      if (pendingBitmap && pendingBitmap !== bmp) {
+        try { pendingBitmap.close(); } catch (_) {}
+      }
+      pendingBitmap = bmp;
+
+      if (!pendingRafId) {
+        pendingRafId = requestAnimationFrame(renderPendingFrame);
+      }
+    }
+
+    function renderPendingFrame() {
+      pendingRafId = null;
+      if (!streamActive || isPreviewHidden) {
+        if (pendingBitmap) {
+          try { pendingBitmap.close(); } catch (_) {}
+          pendingBitmap = null;
+        }
+        return;
+      }
+      const bmp = pendingBitmap;
+      pendingBitmap = null;
+      if (bmp) {
+        renderFrame(bmp);
+      }
     }
 
     function renderFrame(bmp) {
@@ -1350,6 +1402,14 @@
       streamActive = false;
       stopWebSocketStream();
       stopMjpegStream();
+      if (pendingBitmap) {
+        try { pendingBitmap.close(); } catch (_) {}
+        pendingBitmap = null;
+      }
+      if (pendingRafId) {
+        cancelAnimationFrame(pendingRafId);
+        pendingRafId = null;
+      }
       if (lastDrawnBmp) {
         try { lastDrawnBmp.close(); } catch (_) {}
         lastDrawnBmp = null;
@@ -1462,7 +1522,7 @@
         const blob = new Blob([jpegBytes], { type: 'image/jpeg' });
         createImageBitmap(blob).then(bmp => {
           if (streamActive && currentTransport === 'ws') {
-            requestAnimationFrame(() => renderFrame(bmp));
+            queueFrameForRender(bmp, serverTs);
           } else {
             bmp.close();
           }
@@ -1538,7 +1598,7 @@
             const blob = new Blob([frameBytes], { type: 'image/jpeg' });
             createImageBitmap(blob).then(bmp => {
               if (streamActive && currentTransport === 'mjpeg') {
-                requestAnimationFrame(() => renderFrame(bmp));
+                queueFrameForRender(bmp, 0);
               } else {
                 bmp.close();
               }

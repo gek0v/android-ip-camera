@@ -430,13 +430,7 @@ class BinaryWebSocketHelper(
         if (activeClients.isEmpty()) return
 
         val frameIndex = frameCounter.getAndIncrement()
-        val totalPayloadSize = VIDEO_HEADER_SIZE + jpegBytes.size
-        val frameHeader = buildFrameHeader(totalPayloadSize.toLong(), OPCODE_BINARY, true)
-        val videoHeader = buildVideoHeader(timestamp, frameIndex, flags, jpegBytes.size)
-
-        val combinedHeader = ByteArray(frameHeader.size + videoHeader.size)
-        System.arraycopy(frameHeader, 0, combinedHeader, 0, frameHeader.size)
-        System.arraycopy(videoHeader, 0, combinedHeader, frameHeader.size, videoHeader.size)
+        val messageBytes = encodeVideoFrameMessage(jpegBytes, timestamp, frameIndex, flags)
 
         for (client in activeClients) {
             if (client.isClosed || client.socket.isClosed) {
@@ -451,8 +445,7 @@ class BinaryWebSocketHelper(
                     try {
                         if (!client.isClosed && !client.socket.isClosed) {
                             synchronized(client.outputStream) {
-                                client.outputStream.write(combinedHeader)
-                                client.outputStream.write(jpegBytes)
+                                client.outputStream.write(messageBytes)
                                 client.outputStream.flush()
                             }
                             client.lastActiveMs = System.currentTimeMillis()

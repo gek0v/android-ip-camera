@@ -198,8 +198,10 @@ object SocketTuningHelper {
             return true
         }
 
-        if (!isSocketBufferReadyForWrite(socket)) {
-            return true
+        val customChecker = osPollOutChecker
+        if (customChecker != null) {
+            val fd = extractFileDescriptor(socket) ?: FileDescriptor()
+            if (!customChecker(fd)) return true
         }
 
         return false
