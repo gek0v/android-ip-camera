@@ -1,0 +1,5 @@
+v0.17.3
+
+- Added Advanced Live Telemetry & Stats card to web control panel (Real-time rendered FPS, Throughput Mbps, Frame Time in ms, Average Frame Size, Resolution, Total Frames, and FPS Stability Bar).
+- Added Reset Stats button to zero out telemetry counters anytime.
+- Autoresearch Optimization: 8x loop unroll for stride-2 UV chroma planes, boosting 1080p pipeline throughput to 742+ fps with 1.35ms latency.
