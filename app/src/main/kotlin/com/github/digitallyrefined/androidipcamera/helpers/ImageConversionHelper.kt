@@ -48,6 +48,12 @@ fun convertYUV420toNV21(image: ImageProxy, reuse: ByteArray? = null, reuseRow: B
         val shift: Int = if (i == 0) 0 else 1
         val w: Int = width shr shift
         val h: Int = height shr shift
+        if (i == 0 && pixelStride == 1 && pRowStride == w && cropLeft == 0 && cropTop == 0) {
+            buffer.position(0)
+            buffer.get(data, 0, w * h)
+            continue
+        }
+
         buffer.position(pRowStride * (cropTop shr shift) + pixelStride * (cropLeft shr shift))
         for (row in 0 until h) {
             val length: Int
