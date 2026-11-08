@@ -65,10 +65,25 @@ class StreamingServerHelper(
         val writer: PrintWriter,
         val connectedAt: Long = System.currentTimeMillis(),
         val isAuthenticated: Boolean = false,
-        @Volatile var lastSuccessfulWriteMs: Long = System.currentTimeMillis()
+        @Volatile var lastSuccessfulWriteMs: Long = System.currentTimeMillis(),
+        @Volatile var isWriting: Boolean = false,
+        @Volatile var droppedFrames: Long = 0L
     ) {
+        fun markWriteStart() {
+            isWriting = true
+        }
+
+        fun markWriteEnd() {
+            isWriting = false
+        }
+
         fun markWriteSuccess() {
             lastSuccessfulWriteMs = System.currentTimeMillis()
+            isWriting = false
+        }
+
+        fun recordDroppedFrame() {
+            droppedFrames++
         }
     }
 
@@ -907,10 +922,11 @@ class StreamingServerHelper(
                 // AUTHENTICATED CONNECTION if auth is enabled - No rate limiting, higher connection limits
                 if (handleMaxClients(socket, isAuthenticated = enableAuth)) return
 
+                val tuning = SocketTuningHelper.tuneStreamingSocket(socket)
                 try {
-                    socket.tcpNoDelay = true
                     socket.sendBufferSize = 64 * 1024
                 } catch (_: Exception) {}
+                onLog("Streaming socket tuned for " + clientIp + ": tcpNoDelay=" + tuning.tcpNoDelayApplied + ", lowat=" + tuning.tcpNotSentLowatApplied)
 
                 // Send HTTP response headers for MJPEG stream
                 writer.print("HTTP/1.1 200 OK\r\n")
@@ -1906,12 +1922,15 @@ class StreamingServerHelper(
         val now = System.currentTimeMillis()
         val toRemove = clients.filter { client ->
             val maxDuration = if (client.isAuthenticated) MAX_AUTHENTICATED_CONNECTION_DURATION_MS else MAX_CONNECTION_DURATION_MS
-            now - client.connectedAt > maxDuration
+            val expired = (now - client.connectedAt) > maxDuration
+            val stalled = (now - client.lastSuccessfulWriteMs) > STALE_WRITE_TIMEOUT_MS
+            expired || stalled
         }
 
         toRemove.forEach { client ->
             val authStatus = if (client.isAuthenticated) "authenticated" else "unauthenticated"
-            onLog("Removing expired $authStatus connection from ${client.socket.inetAddress.hostAddress}")
+            val host = client.socket.inetAddress?.hostAddress ?: "unknown"
+            onLog("Removing expired/stalled " + authStatus + " connection from " + host)
             removeClient(client)
         }
     }

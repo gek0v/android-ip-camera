@@ -317,7 +317,16 @@ class MjpegStreamingEncoder(
 
                 clients.forEach { client ->
                     if (generation != writerGeneration.get()) return@forEach
+
+                    // Proactive application-level frame dropping to eradicate bufferbloat:
+                    // If client socket is congested or draining too slowly, skip stale frame immediately.
+                    if (SocketTuningHelper.shouldDropFrame(client)) {
+                        client.recordDroppedFrame()
+                        return@forEach
+                    }
+
                     try {
+                        client.markWriteStart()
                         val os = client.outputStream
                         os.write(FRAME_HEADER_PREFIX)
                         os.write(lengthBytes)
@@ -327,6 +336,7 @@ class MjpegStreamingEncoder(
                         os.flush()
                         client.markWriteSuccess()
                     } catch (e: Exception) {
+                        client.markWriteEnd()
                         try { client.socket.close() } catch (_: Exception) {}
                         toRemove.add(client)
                     }
