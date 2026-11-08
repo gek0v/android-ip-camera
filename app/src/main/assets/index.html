@@ -423,6 +423,49 @@
     }
 
     /* Fast MJPEG URL Bar */
+    .stats-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 6px;
+    }
+    .stat-box {
+      background: #11141e;
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      padding: 7px 8px;
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+    .stat-label {
+      font-size: 10px;
+      text-transform: uppercase;
+      color: var(--text-dim);
+      font-weight: 600;
+      letter-spacing: 0.5px;
+    }
+    .stat-val {
+      font-size: 13px;
+      font-weight: 700;
+      color: var(--accent);
+      font-family: monospace;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .stat-bar-container {
+      width: 100%;
+      height: 4px;
+      background: #11141e;
+      border-radius: 2px;
+      overflow: hidden;
+      margin-top: 2px;
+    }
+    .stat-bar {
+      height: 100%;
+      background: linear-gradient(90deg, var(--primary), var(--accent));
+      transition: width 0.3s ease;
+    }
     .stream-url-bar {
       background: #11141e;
       border: 1px solid var(--border);
@@ -589,6 +632,43 @@
           <div class="grid-2">
             <button class="btn" onclick="copyObsUrl()" title="Copy clean stream link designed for OBS Browser Source">🎥 Copy OBS Link</button>
             <a id="openStreamLink" href="/video/mjpeg" target="_blank" class="btn" style="text-align:center;">↗ Open Stream</a>
+          </div>
+        </section>
+
+        <!-- Advanced Telemetry & Stats Card -->
+        <section class="card" id="statsCard">
+          <div class="card-title">
+            <span>📊 Advanced Live Stats</span>
+            <button class="btn" onclick="resetStats()" style="padding: 2px 8px; font-size: 11px;">Reset</button>
+          </div>
+          <div class="stats-grid">
+            <div class="stat-box">
+              <span class="stat-label">Rendered FPS</span>
+              <span class="stat-val" id="statFps">0.0 fps</span>
+            </div>
+            <div class="stat-box">
+              <span class="stat-label">Throughput</span>
+              <span class="stat-val" id="statBitrate">0.00 Mbps</span>
+            </div>
+            <div class="stat-box">
+              <span class="stat-label">Frame Time</span>
+              <span class="stat-val" id="statFrameTime">0.0 ms</span>
+            </div>
+            <div class="stat-box">
+              <span class="stat-label">Frame Size</span>
+              <span class="stat-val" id="statFrameSize">0 KB</span>
+            </div>
+            <div class="stat-box">
+              <span class="stat-label">Resolution</span>
+              <span class="stat-val" id="statRes">--</span>
+            </div>
+            <div class="stat-box">
+              <span class="stat-label">Total Frames</span>
+              <span class="stat-val" id="statTotal">0</span>
+            </div>
+          </div>
+          <div class="stat-bar-container" title="FPS Real-time Stability Bar">
+            <div class="stat-bar" id="fpsBar" style="width: 0%;"></div>
           </div>
         </section>
 
@@ -811,9 +891,30 @@
     let rotate = 0;
     let desiredResolution = 'auto';
 
-    // FPS calculation
+    // Advanced Telemetry & FPS Statistics
     let frameCount = 0;
+    let totalFrames = 0;
+    let bytesThisInterval = 0;
     let lastFpsTime = performance.now();
+    let lastFrameTimestamp = performance.now();
+    let currentFps = 0.0;
+    let currentBitrateMbps = 0.0;
+    let avgFrameSizeKb = 0;
+    let lastFrameTimeMs = 0;
+
+    function resetStats() {
+      totalFrames = 0;
+      frameCount = 0;
+      bytesThisInterval = 0;
+      lastFpsTime = performance.now();
+      getEl('statTotal').textContent = '0';
+      getEl('statFps').textContent = '0.0 fps';
+      getEl('statBitrate').textContent = '0.00 Mbps';
+      getEl('statFrameTime').textContent = '0.0 ms';
+      getEl('statFrameSize').textContent = '0 KB';
+      getEl('fpsBar').style.width = '0%';
+      showToast('Telemetry counters reset');
+    }
 
     function showToast(msg) {
       toast.textContent = msg;
@@ -953,13 +1054,39 @@
           }
           lastDrawnBmp = bmp;
 
+          totalFrames++;
           frameCount++;
           const now = performance.now();
+          lastFrameTimeMs = Math.round((now - lastFrameTimestamp) * 10) / 10;
+          lastFrameTimestamp = now;
+
           if (now - lastFpsTime >= 1000) {
-            const fps = Math.round((frameCount * 1000) / (now - lastFpsTime));
+            const durationSec = (now - lastFpsTime) / 1000.0;
+            currentFps = Math.round((frameCount / durationSec) * 10) / 10;
+            currentBitrateMbps = Math.round(((bytesThisInterval * 8) / (1024 * 1024 * durationSec)) * 100) / 100;
+            const avgKb = frameCount > 0 ? Math.round((bytesThisInterval / frameCount) / 1024) : 0;
+
             const fpsEl = getEl('fpsStatus');
-            if (fpsEl) fpsEl.textContent = `⚡ ${fps} fps`;
+            if (fpsEl) fpsEl.textContent = `⚡ ${currentFps} fps`;
+
+            const sFps = getEl('statFps');
+            if (sFps) sFps.textContent = `${currentFps} fps`;
+            const sBr = getEl('statBitrate');
+            if (sBr) sBr.textContent = `${currentBitrateMbps} Mbps`;
+            const sFt = getEl('statFrameTime');
+            if (sFt) sFt.textContent = `${lastFrameTimeMs} ms`;
+            const sFs = getEl('statFrameSize');
+            if (sFs) sFs.textContent = `${avgKb} KB`;
+            const sTot = getEl('statTotal');
+            if (sTot) sTot.textContent = `${totalFrames}`;
+            const sBar = getEl('fpsBar');
+            if (sBar) {
+              const pct = Math.min(100, Math.round((currentFps / 30) * 100));
+              sBar.style.width = `${pct}%`;
+            }
+
             frameCount = 0;
+            bytesThisInterval = 0;
             lastFpsTime = now;
           }
           setStreamResolution(iw, ih);
@@ -976,6 +1103,7 @@
             const frameBytes = buffer.subarray(soi, eoi);
             buffer = buffer.subarray(eoi);
 
+            bytesThisInterval += frameBytes.length;
             const blob = new Blob([frameBytes], { type: 'image/jpeg' });
             createImageBitmap(blob).then(bmp => {
               if (mjpegRunning) renderFrame(bmp);
@@ -1199,6 +1327,8 @@
       const label = `${w}×${h}`;
       const badge = getEl('resLiveBadge');
       if (badge) badge.textContent = label;
+      const statRes = getEl('statRes');
+      if (statRes) statRes.textContent = label;
     }
 
     function takeSnapshot() {
