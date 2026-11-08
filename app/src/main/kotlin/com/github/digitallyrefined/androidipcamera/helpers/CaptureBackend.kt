@@ -28,5 +28,9 @@ interface CaptureBackend {
      * continuous autofocus.
      */
     fun setManualFocus(distance: Float)
+    /** Active sensor array bounds, or null if unknown / unsupported. */
+    val sensorActiveArraySize: android.graphics.Rect? get() = null
+    /** Sets crop region for ePTZ on the Camera2 ISP (CaptureRequest.SCALER_CROP_REGION). */
+    fun setCropRegion(rect: android.graphics.Rect?) {}
     fun stop()
 }
