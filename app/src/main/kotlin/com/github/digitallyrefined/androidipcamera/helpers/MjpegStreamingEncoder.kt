@@ -25,6 +25,7 @@ import java.util.concurrent.atomic.AtomicLong
 class MjpegStreamingEncoder(
     private val context: Context,
     private var streamingServerHelper: StreamingServerHelper?,
+    var thermalGovernor: ThermalGovernor? = null,
     private val onLog: (String) -> Unit = {}
 ) : StreamingEncoder {
     companion object {
@@ -45,6 +46,18 @@ class MjpegStreamingEncoder(
         ArrayBlockingQueue(writerQueueCapacity),
         { runnable -> Thread(runnable, "MjpegNetworkWriter").apply { isDaemon = true } }
     ).apply { allowCoreThreadTimeOut(true) }
+
+    var isSceneStatic: (() -> Boolean)? = null
+
+    init {
+        thermalGovernor?.addThermalStateListener {
+            try {
+                networkWriter.execute {
+                    thermalGovernor?.applyEfficiencyThreadPriority()
+                }
+            } catch (_: Exception) {}
+        }
+    }
 
     private var nv21Buffer: ByteArray? = null
     private var nv21RowBuffer: ByteArray? = null
@@ -95,26 +108,28 @@ class MjpegStreamingEncoder(
             ?: DeviceMemoryHelper.defaultJpegQuality(context)
         val bitrateKbps = prefs.getString("stream_bitrate", "0")?.toIntOrNull() ?: 0
 
-        if (bitrateKbps <= 0) {
+        val baseQuality = if (bitrateKbps <= 0) {
             // Unlimited bitrate: strictly honor configured quality (e.g. 95% for maximum quality)
-            return configuredQuality.coerceIn(10, 100)
-        }
-
-        // Target bytes per frame = (bitrateKbps * 1000 / 8) / fps
-        val targetFrameBytes = (bitrateKbps * 1000L / 8L) / fps.coerceAtLeast(1)
-
-        if (lastFrameBytes > 0) {
-            if (lastFrameBytes > targetFrameBytes * 1.05) {
-                val step = if (lastFrameBytes > targetFrameBytes * 1.3) 4 else 2
-                dynamicQuality = (dynamicQuality - step).coerceAtLeast(15)
-            } else if (lastFrameBytes < targetFrameBytes * 0.85 && dynamicQuality < configuredQuality) {
-                dynamicQuality = (dynamicQuality + 1).coerceAtMost(configuredQuality)
-            }
+            configuredQuality.coerceIn(10, 100)
         } else {
-            dynamicQuality = configuredQuality
+            // Target bytes per frame = (bitrateKbps * 1000 / 8) / fps
+            val targetFrameBytes = (bitrateKbps * 1000L / 8L) / fps.coerceAtLeast(1)
+
+            if (lastFrameBytes > 0) {
+                if (lastFrameBytes > targetFrameBytes * 1.05) {
+                    val step = if (lastFrameBytes > targetFrameBytes * 1.3) 4 else 2
+                    dynamicQuality = (dynamicQuality - step).coerceAtLeast(15)
+                } else if (lastFrameBytes < targetFrameBytes * 0.85 && dynamicQuality < configuredQuality) {
+                    dynamicQuality = (dynamicQuality + 1).coerceAtMost(configuredQuality)
+                }
+            } else {
+                dynamicQuality = configuredQuality
+            }
+
+            dynamicQuality.coerceIn(10, 100)
         }
 
-        return dynamicQuality.coerceIn(10, 100)
+        return thermalGovernor?.effectiveQuality(baseQuality) ?: baseQuality
     }
 
     override fun processFrame(image: ImageProxy) {
@@ -122,13 +137,20 @@ class MjpegStreamingEncoder(
         try {
             val prefs = PreferenceManager.getDefaultSharedPreferences(context)
             val fps = prefs.getString("stream_fps", "30")?.toIntOrNull() ?: 30
-            val fpsCoerced = fps.coerceIn(1, 60)
+            val configuredFps = fps.coerceIn(1, 60)
+            val fpsCoerced = thermalGovernor?.effectiveFps(configuredFps) ?: configuredFps
             val delay = try { 1000L / fpsCoerced } catch (_: Exception) { 33L }
             val currentTime = System.currentTimeMillis()
             // Jitter tolerance of 8ms ensures ~30fps camera frames (often arriving at 31-33ms) are not dropped to 15fps
             val minInterval = (delay - 8L).coerceAtLeast(0L)
 
             if (currentTime - lastFrameTime < minInterval) return
+
+            val isStatic = isSceneStatic?.invoke() ?: false
+            if (thermalGovernor?.shouldSkipStaticFrame(isStatic) == true) {
+                lastFrameTime = currentTime
+                return
+            }
             lastFrameTime = currentTime
 
             val camId = prefs.getString("camera_id", null)
@@ -212,11 +234,18 @@ class MjpegStreamingEncoder(
         try {
             val prefs = PreferenceManager.getDefaultSharedPreferences(context)
             val fps = prefs.getString("stream_fps", "30")?.toIntOrNull() ?: 30
-            val fpsCoerced = fps.coerceIn(1, 60)
+            val configuredFps = fps.coerceIn(1, 60)
+            val fpsCoerced = thermalGovernor?.effectiveFps(configuredFps) ?: configuredFps
             val delay = try { 1000L / fpsCoerced } catch (_: Exception) { 33L }
             val currentTime = System.currentTimeMillis()
             val minInterval = (delay - 8L).coerceAtLeast(0L)
             if (currentTime - lastFrameTime < minInterval) return
+
+            val isStatic = isSceneStatic?.invoke() ?: false
+            if (thermalGovernor?.shouldSkipStaticFrame(isStatic) == true) {
+                lastFrameTime = currentTime
+                return
+            }
             lastFrameTime = currentTime
 
             val camId = prefs.getString("camera_id", null)
@@ -312,6 +341,7 @@ class MjpegStreamingEncoder(
         try {
             networkWriter.execute {
                 if (generation != writerGeneration.get()) return@execute
+                thermalGovernor?.applyEfficiencyThreadPriority()
                 val toRemove = mutableListOf<StreamingServerHelper.Client>()
                 val lengthBytes = jpegBytes.size.toString().toByteArray(StandardCharsets.US_ASCII)
 

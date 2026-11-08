@@ -61,6 +61,8 @@ class StreamingService : LifecycleService() {
     /** Motion detection over the capture frames already delivered to the streaming pipeline. */
     private var motionMonitor: MotionMonitor? = null
 
+    val thermalGovernor = ThermalGovernor(this)
+
     // Streaming encoder (MJPEG)
     private var mjpegStreamingEncoder: MjpegStreamingEncoder? = null
     private val encoders: List<StreamingEncoder>
@@ -137,6 +139,12 @@ class StreamingService : LifecycleService() {
             val filter = IntentFilter(NotificationManager.ACTION_NOTIFICATION_CHANNEL_BLOCK_STATE_CHANGED)
             registerReceiver(notificationChannelReceiver, filter)
         }
+        thermalGovernor.register(this)
+        thermalGovernor.onThermalStateChanged = { state ->
+            val tempStr = thermalGovernor.currentBatteryTempCelsius?.let { "${it}°C" } ?: "unknown"
+            Log.i(TAG, "Thermal governor: state changed to $state (battery: $tempStr)")
+            onLog?.invoke("Thermal governor: state=$state (battery: $tempStr)")
+        }
         startStreamingServer()
     }
 
@@ -173,6 +181,7 @@ class StreamingService : LifecycleService() {
 
     override fun onDestroy() {
         super.onDestroy()
+        thermalGovernor.unregister()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
             try { unregisterReceiver(notificationChannelReceiver) } catch (_: Exception) {}
         }
@@ -300,7 +309,15 @@ class StreamingService : LifecycleService() {
                     if (!enabled) streamingServerHelper?.closeClientConnection()
                 }
             )
-            mjpegStreamingEncoder = MjpegStreamingEncoder(this, streamingServerHelper!!) { Log.i(TAG, "MJPEG: $it"); onLog?.invoke(it) }
+            mjpegStreamingEncoder = MjpegStreamingEncoder(
+                this,
+                streamingServerHelper!!,
+                thermalGovernor
+            ) { Log.i(TAG, "MJPEG: $it"); onLog?.invoke(it) }.apply {
+                isSceneStatic = {
+                    motionMonitor?.enabled == true && motionMonitor?.detector?.active == false
+                }
+            }
             motionMonitor = MotionMonitor(this) { active ->
                 Log.i(TAG, "Motion ${if (active) "started" else "ended"}")
             }
@@ -470,8 +487,8 @@ class StreamingService : LifecycleService() {
         val mjpeg = mjpegStreamingEncoder
         val motion = motionMonitor?.takeIf { it.enabled }
         cap.setPreviewFrameCallback { nv21 ->
-            mjpeg?.processNv21Frame(nv21, cap.chosenW, cap.chosenH)
             motion?.processNv21Frame(nv21, cap.chosenW, cap.chosenH)
+            mjpeg?.processNv21Frame(nv21, cap.chosenW, cap.chosenH)
         }
         backend = cap
         applyStored(cap)
