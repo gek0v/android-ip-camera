@@ -481,6 +481,9 @@ class CameraXCapture(
     }
     override fun setExposure(ev: Int) { exposureIndex = ev; try { camera?.cameraControl?.setExposureCompensationIndex(ev) } catch (_: Exception) {} }
     override fun setZoom(ratio: Float) { zoomRatio = ratio; applyZoomWithRetry(ratio) }
+    @Volatile private var focusLocked: Boolean = false
+    override fun isFocusLocked(): Boolean = focusLocked
+
     @OptIn(ExperimentalCamera2Interop::class)
     override fun triggerAutoFocus() {
         focusOnPoint(0.5f, 0.5f)
@@ -527,18 +530,42 @@ class CameraXCapture(
     }
 
     override fun focusOnPoint(x: Float, y: Float) {
+        performFocusAndMetering(x, y, lock = false)
+    }
+
+    @OptIn(ExperimentalCamera2Interop::class)
+    override fun focusAndLock(x: Float, y: Float) {
+        performFocusAndMetering(x, y, lock = true)
+    }
+
+    @OptIn(ExperimentalCamera2Interop::class)
+    private fun performFocusAndMetering(x: Float, y: Float, lock: Boolean) {
         try {
             val cam = camera ?: return
             manualFocus = null
             applyCamera2Options()
             val pt = SurfaceOrientedMeteringPointFactory(1f, 1f).createPoint(x.coerceIn(0f, 1f), y.coerceIn(0f, 1f))
-            cam.cameraControl.startFocusAndMetering(
-                FocusMeteringAction.Builder(pt, FocusMeteringAction.FLAG_AF or FocusMeteringAction.FLAG_AE)
-                    .setAutoCancelDuration(4, TimeUnit.SECONDS).build())
-        } catch (e: Exception) { Log.e(TAG, "focusOnPoint: ${e.message}") }
+            val builder = FocusMeteringAction.Builder(pt, FocusMeteringAction.FLAG_AF or FocusMeteringAction.FLAG_AE)
+            if (lock) {
+                builder.disableAutoCancel()
+                focusLocked = true
+            } else {
+                builder.setAutoCancelDuration(4, TimeUnit.SECONDS)
+                focusLocked = false
+            }
+            cam.cameraControl.startFocusAndMetering(builder.build())
+        } catch (e: Exception) { Log.e(TAG, "performFocusAndMetering: ${e.message}") }
+    }
+
+    override fun unlockFocus() {
+        focusLocked = false
+        try {
+            camera?.cameraControl?.cancelFocusAndMetering()
+        } catch (e: Exception) { Log.e(TAG, "unlockFocus: ${e.message}") }
     }
 
     override fun setFocusMode(mode: String) {
+        unlockFocus()
         when (mode.lowercase()) {
             "continuous" -> setManualFocus(-1f)
             "infinity" -> setManualFocus(0f)

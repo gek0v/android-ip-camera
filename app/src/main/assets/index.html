@@ -241,6 +241,24 @@
       transform: translate(-50%, -50%) scale(1);
     }
 
+    .focus-ring.locked {
+      opacity: 1 !important;
+      transform: translate(-50%, -50%) scale(1) !important;
+      border: 2px solid #eab308 !important;
+      border-radius: 50%;
+      box-shadow: 0 0 14px rgba(234, 179, 8, 0.8) !important;
+      pointer-events: auto !important;
+      cursor: pointer;
+    }
+    .focus-ring.locked::after {
+      content: '🔒';
+      position: absolute;
+      top: -20px;
+      left: 50%;
+      transform: translateX(-50%);
+      font-size: 13px;
+    }
+
     /* Status Overlay in Video */
     .status-overlay {
       position: absolute;
@@ -795,12 +813,16 @@
         <section class="card">
           <div class="card-title">
             <span>Focus &amp; Optics</span>
-            <button id="focusTriggerBtn" class="btn btn-primary" style="padding: 3px 8px; font-size: 11px;">🎯 Focus Now</button>
+            <div style="display:flex; gap: 6px;">
+              <button id="focusTriggerBtn" class="btn btn-primary" style="padding: 3px 8px; font-size: 11px;" title="Trigger Auto Focus scan">🎯 Focus</button>
+              <button id="focusLockBtn" class="btn btn-secondary" style="padding: 3px 8px; font-size: 11px;" title="Lock Focus &amp; Exposure (Shortcut: L)">🔒 Lock</button>
+            </div>
           </div>
 
           <div class="control-row">
             <div class="control-header">
               <label for="focusModeSelect">Focus Mode</label>
+              <span id="focusLockBadge" class="val-badge" style="display: none; background: rgba(234, 179, 8, 0.2); color: #eab308; border-color: rgba(234, 179, 8, 0.4);">🔒 AF/AE LOCKED</span>
             </div>
             <select id="focusModeSelect" onchange="onFocusModeChange(this.value)">
               <option value="continuous">Continuous Auto Focus (Default)</option>
@@ -809,6 +831,13 @@
               <option value="macro">Macro (Close-up)</option>
               <option value="manual">Manual Distance</option>
             </select>
+          </div>
+
+          <div class="control-row" style="margin-top: -4px; margin-bottom: 6px;">
+            <label style="font-size: 12px; color: var(--text-muted); cursor: pointer; display: flex; align-items: center; gap: 6px; user-select: none;">
+              <input type="checkbox" id="focusLockOnTapCheckbox">
+              <span>Lock position on tap (AF/AE Lock)</span>
+            </label>
           </div>
 
           <div class="control-row" id="focusDistanceRow" style="display: none;">
@@ -1156,7 +1185,8 @@
 
     function copyObsUrl() {
       const loc = window.location;
-      const url = loc.protocol + "//" + loc.host + "/obs";
+      const search = loc.search ? loc.search : "";
+      const url = loc.protocol + "//" + loc.host + "/obs" + search;
       navigator.clipboard.writeText(url).then(() => {
         showToast('OBS Browser Link copied to clipboard!');
       }).catch(() => {
@@ -1575,6 +1605,46 @@
       }
     }
 
+    let isFocusLocked = false;
+    let lockedPoint = null;
+
+    function lockFocusAt(normX, normY, pxX, pxY) {
+      isFocusLocked = true;
+      lockedPoint = { x: pxX, y: pxY, normX: normX, normY: normY };
+      focusRing.style.left = `${pxX}px`;
+      focusRing.style.top = `${pxY}px`;
+      focusRing.classList.remove('active');
+      focusRing.classList.add('locked');
+      focusRing.title = "Click to Unlock AF/AE";
+      const badge = getEl('focusLockBadge');
+      if (badge) badge.style.display = 'inline-block';
+      const btn = getEl('focusLockBtn');
+      if (btn) {
+        btn.textContent = '🔓 Unlock';
+        btn.classList.remove('btn-secondary');
+        btn.classList.add('btn-warning');
+      }
+      sendControl('focus_lock', `${normX.toFixed(3)},${normY.toFixed(3)}`);
+      showToast(`🔒 AF/AE Locked at ${Math.round(normX * 100)}%, ${Math.round(normY * 100)}%`);
+    }
+
+    function unlockFocus() {
+      isFocusLocked = false;
+      lockedPoint = null;
+      focusRing.classList.remove('locked');
+      focusRing.classList.remove('active');
+      const badge = getEl('focusLockBadge');
+      if (badge) badge.style.display = 'none';
+      const btn = getEl('focusLockBtn');
+      if (btn) {
+        btn.textContent = '🔒 Lock';
+        btn.classList.remove('btn-warning');
+        btn.classList.add('btn-secondary');
+      }
+      sendControl('focus_unlock', '1');
+      showToast('🔓 AF/AE Unlocked (Continuous AF)');
+    }
+
     // Tap to focus on canvas
     streamCanvas.addEventListener('click', e => {
       const rect = streamCanvas.getBoundingClientRect();
@@ -1583,19 +1653,54 @@
       const normX = Math.max(0, Math.min(1, clickX / rect.width));
       const normY = Math.max(0, Math.min(1, clickY / rect.height));
 
-      // Visual pulse ring
-      focusRing.style.left = `${e.clientX - streamContainer.getBoundingClientRect().left}px`;
-      focusRing.style.top = `${e.clientY - streamContainer.getBoundingClientRect().top}px`;
-      focusRing.classList.add('active');
-      setTimeout(() => focusRing.classList.remove('active'), 800);
+      const containerRect = streamContainer.getBoundingClientRect();
+      const relX = e.clientX - containerRect.left;
+      const relY = e.clientY - containerRect.top;
 
-      sendControl('focus_point', `${normX.toFixed(3)},${normY.toFixed(3)}`);
-      showToast(`🎯 Focusing at ${Math.round(normX * 100)}%, ${Math.round(normY * 100)}%`);
+      // If already locked and clicked near the lock ring, unlock
+      if (isFocusLocked && lockedPoint) {
+        const dx = relX - lockedPoint.x;
+        const dy = relY - lockedPoint.y;
+        if (Math.sqrt(dx * dx + dy * dy) < 40) {
+          unlockFocus();
+          return;
+        }
+      }
+
+      const shouldLock = getEl('focusLockOnTapCheckbox')?.checked;
+      if (shouldLock) {
+        lockFocusAt(normX, normY, relX, relY);
+      } else {
+        if (isFocusLocked) {
+          unlockFocus();
+        }
+        // Visual pulse ring
+        focusRing.style.left = `${relX}px`;
+        focusRing.style.top = `${relY}px`;
+        focusRing.classList.remove('locked');
+        focusRing.classList.add('active');
+        setTimeout(() => {
+          if (!isFocusLocked) focusRing.classList.remove('active');
+        }, 800);
+
+        sendControl('focus_point', `${normX.toFixed(3)},${normY.toFixed(3)}`);
+        showToast(`🎯 Focusing at ${Math.round(normX * 100)}%, ${Math.round(normY * 100)}%`);
+      }
     });
 
     getEl('focusTriggerBtn').addEventListener('click', () => {
+      if (isFocusLocked) unlockFocus();
       sendControl('focus_trigger', '1');
       showToast('🎯 Triggered Auto Focus');
+    });
+
+    getEl('focusLockBtn').addEventListener('click', () => {
+      if (isFocusLocked) {
+        unlockFocus();
+      } else {
+        const containerRect = streamContainer.getBoundingClientRect();
+        lockFocusAt(0.5, 0.5, containerRect.width / 2, containerRect.height / 2);
+      }
     });
 
     function onPipToggle(checked) {
@@ -1608,6 +1713,19 @@
     }
 
     function onFocusModeChange(mode) {
+      if (isFocusLocked) {
+        isFocusLocked = false;
+        lockedPoint = null;
+        focusRing.classList.remove('locked');
+        const badge = getEl('focusLockBadge');
+        if (badge) badge.style.display = 'none';
+        const btn = getEl('focusLockBtn');
+        if (btn) {
+          btn.textContent = '🔒 Lock';
+          btn.classList.remove('btn-warning');
+          btn.classList.add('btn-secondary');
+        }
+      }
       sendControl('focus_mode', mode);
       const row = getEl('focusDistanceRow');
       if (row) row.style.display = (mode === 'manual') ? 'flex' : 'none';
@@ -1831,6 +1949,17 @@
               getEl('focusModeSelect').value = s.focusMode;
               onFocusModeChange(s.focusMode);
             }
+            if (s.focusLocked) {
+              isFocusLocked = true;
+              const badge = getEl('focusLockBadge');
+              if (badge) badge.style.display = 'inline-block';
+              const btn = getEl('focusLockBtn');
+              if (btn) {
+                btn.textContent = '🔓 Unlock';
+                btn.classList.remove('btn-secondary');
+                btn.classList.add('btn-warning');
+              }
+            }
             if (s.pipEnabled !== undefined) {
               const chk = getEl('pipCheckbox');
               if (chk) {
@@ -1884,6 +2013,7 @@
     window.addEventListener('resize', () => {
       applyCanvasSize(targetCanvasSize(lastDrawnBmp));
     });
+
 
     // Cinematic ePTZ & Preset Management
     let eptzState = {
@@ -2035,6 +2165,17 @@
       if (tag === "input" || tag === "textarea" || tag === "select") return;
 
       const key = e.key;
+
+      if (key === "l" || key === "L") {
+        e.preventDefault();
+        if (isFocusLocked) {
+          unlockFocus();
+        } else {
+          const containerRect = streamContainer.getBoundingClientRect();
+          lockFocusAt(0.5, 0.5, containerRect.width / 2, containerRect.height / 2);
+        }
+        return;
+      }
       if (e.shiftKey) {
         if (key === "1" || key === "!") { e.preventDefault(); saveEptzPreset(1); return; }
         if (key === "2" || key === "@") { e.preventDefault(); saveEptzPreset(2); return; }
@@ -2075,7 +2216,6 @@
     });
 
     fetchEptzStatus();
-
     // Initialize
     updateStreamUrlDisplay();
     applyPreviewState();

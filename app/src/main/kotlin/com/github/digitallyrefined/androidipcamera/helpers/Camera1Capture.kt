@@ -188,7 +188,23 @@ class Camera1Capture(private val cameraId: Int, targetW: Int, targetH: Int) : Ca
         }
     }
 
+    @Volatile private var focusLocked: Boolean = false
+    override fun isFocusLocked(): Boolean = focusLocked
+
+    override fun focusAndLock(x: Float, y: Float) {
+        focusLocked = true
+        triggerAutoFocus()
+    }
+
+    override fun unlockFocus() {
+        focusLocked = false
+        try {
+            camera.cancelAutoFocus()
+        } catch (_: Exception) {}
+    }
+
     override fun setFocusMode(mode: String) = live { p ->
+        unlockFocus()
         val modes = p.supportedFocusModes ?: return@live
         when (mode.lowercase()) {
             "continuous" -> {

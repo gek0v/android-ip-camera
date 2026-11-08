@@ -870,10 +870,11 @@ class StreamingService : LifecycleService() {
                 launchMain { backend?.setManualFocus(f) }
             }
             "focus_mode" -> {
-                prefs.edit().putString("focus_mode", value).apply()
+                prefs.edit().putString("focus_mode", value).putBoolean("focus_locked", false).apply()
                 launchMain { backend?.setFocusMode(value) }
             }
             "focus_trigger" -> {
+                prefs.edit().putBoolean("focus_locked", false).apply()
                 launchMain { backend?.triggerAutoFocus() }
             }
             "eptz_pan" -> {
@@ -904,13 +905,39 @@ class StreamingService : LifecycleService() {
             }
             "focus_point" -> {
                 val parts = value.split(",")
+                if (parts.size >= 2) {
+                    val x = parts[0].toFloatOrNull()
+                    val y = parts[1].toFloatOrNull()
+                    val lock = if (parts.size >= 3) parts[2] == "1" || parts[2].lowercase() == "true" else false
+                    if (x != null && y != null) {
+                        prefs.edit().putBoolean("focus_locked", lock).apply()
+                        launchMain {
+                            if (lock) backend?.focusAndLock(x, y)
+                            else backend?.focusOnPoint(x, y)
+                        }
+                    }
+                }
+            }
+            "focus_lock" -> {
+                val parts = value.split(",")
                 if (parts.size == 2) {
                     val x = parts[0].toFloatOrNull()
                     val y = parts[1].toFloatOrNull()
                     if (x != null && y != null) {
-                        launchMain { backend?.focusOnPoint(x, y) }
+                        prefs.edit().putBoolean("focus_locked", true).apply()
+                        launchMain { backend?.focusAndLock(x, y) }
                     }
+                } else if (value == "1" || value.lowercase() == "true") {
+                    prefs.edit().putBoolean("focus_locked", true).apply()
+                    launchMain { backend?.focusAndLock(0.5f, 0.5f) }
+                } else if (value == "0" || value.lowercase() == "false" || value == "unlock") {
+                    prefs.edit().putBoolean("focus_locked", false).apply()
+                    launchMain { backend?.unlockFocus() }
                 }
+            }
+            "focus_unlock" -> {
+                prefs.edit().putBoolean("focus_locked", false).apply()
+                launchMain { backend?.unlockFocus() }
             }
             "camera" -> {
                 val keepTorchOn = backend?.getTorch() == true
