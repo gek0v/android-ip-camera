@@ -61,6 +61,26 @@ fun convertYUV420toNV21(image: ImageProxy, reuse: ByteArray? = null, reuseRow: B
                 length = w
                 buffer.get(data, channelOffset, length)
                 channelOffset += length
+            } else if (pixelStride == 2 && outputStride == 2) {
+                length = (w - 1) * 2 + 1
+                buffer.get(rowData, 0, length)
+                var r = 0
+                var d = channelOffset
+                val end4 = (w and 3.inv()) * 2
+                while (r < end4) {
+                    data[d] = rowData[r]
+                    data[d + 2] = rowData[r + 2]
+                    data[d + 4] = rowData[r + 4]
+                    data[d + 6] = rowData[r + 6]
+                    d += 8
+                    r += 8
+                }
+                while (r < length) {
+                    data[d] = rowData[r]
+                    d += 2
+                    r += 2
+                }
+                channelOffset = d
             } else {
                 length = (w - 1) * pixelStride + 1
                 buffer.get(rowData, 0, length)
