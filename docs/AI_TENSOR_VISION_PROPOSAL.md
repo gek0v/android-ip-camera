@@ -104,8 +104,7 @@ Si hay más de una persona en la escena, el algoritmo calcula el *Bounding Box E
   1. *Palm Detector:* Localiza la mano en la imagen (trigger de bajo consumo).
   2. *Hand Landmark Model:* Extrae 21 puntos clave 3D de la mano en < 4ms en Tensor TPU.
 - **Máquina de Estados Finitos (FSM) y Debounce Temporal:**
-  - Para evitar
-accidentes, un gesto debe mantenerse estable durante al menos **600 milisegundos** con una confianza > 0.85.
+  - Para evitar accidentes, un gesto debe mantenerse estable durante al menos **600 milisegundos** con una confianza > 0.85.
 
 #### B. Vocabulario de Control Propuesto
 | Gesto | Acción Ejecutada | Feedback al Usuario |
