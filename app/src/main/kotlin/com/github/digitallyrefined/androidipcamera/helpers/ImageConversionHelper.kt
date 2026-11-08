@@ -11,6 +11,15 @@ import java.nio.ByteBuffer
 private val threadLocalJpegStream = ThreadLocal.withInitial { ByteArrayOutputStream(384 * 1024) }
 
 fun convertYUV420toNV21(image: ImageProxy, reuse: ByteArray? = null, reuseRow: ByteArray? = null): ByteArray {
+    val accelerated = try {
+        NativeImagePipeline.convertYuv420ToNv21(image, reuse)
+    } catch (_: Throwable) {
+        null
+    }
+    if (accelerated != null) {
+        return accelerated
+    }
+
     val crop: Rect? = try { image.cropRect } catch (_: Throwable) { null }
     val format: Int = image.format
     val width: Int = if (crop != null && crop.right > crop.left) crop.right - crop.left else image.width
