@@ -11,12 +11,14 @@ import java.nio.ByteBuffer
 private val threadLocalJpegStream = ThreadLocal.withInitial { ByteArrayOutputStream(384 * 1024) }
 
 fun convertYUV420toNV21(image: ImageProxy, reuse: ByteArray? = null, reuseRow: ByteArray? = null): ByteArray {
-    val crop: Rect = image.cropRect
+    val crop: Rect? = try { image.cropRect } catch (_: Throwable) { null }
     val format: Int = image.format
-    val width: Int = crop.width()
-    val height: Int = crop.height()
+    val width: Int = if (crop != null && crop.right > crop.left) crop.right - crop.left else image.width
+    val height: Int = if (crop != null && crop.bottom > crop.top) crop.bottom - crop.top else image.height
+    val cropTop: Int = crop?.top ?: 0
+    val cropLeft: Int = crop?.left ?: 0
     val planes: Array<ImageProxy.PlaneProxy> = image.planes
-    val requiredSize = width * height * ImageFormat.getBitsPerPixel(format) / 8
+    val requiredSize = (width * height * 3) / 2
     val data = if (reuse != null && reuse.size == requiredSize) reuse else ByteArray(requiredSize)
     val rowStride = planes[0].rowStride
     val rowData = if (reuseRow != null && reuseRow.size >= rowStride) reuseRow else ByteArray(rowStride)
@@ -46,7 +48,7 @@ fun convertYUV420toNV21(image: ImageProxy, reuse: ByteArray? = null, reuseRow: B
         val shift: Int = if (i == 0) 0 else 1
         val w: Int = width shr shift
         val h: Int = height shr shift
-        buffer.position(pRowStride * (crop.top shr shift) + pixelStride * (crop.left shr shift))
+        buffer.position(pRowStride * (cropTop shr shift) + pixelStride * (cropLeft shr shift))
         for (row in 0 until h) {
             val length: Int
             if (pixelStride == 1 && outputStride == 1) {

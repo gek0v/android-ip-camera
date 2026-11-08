@@ -92,6 +92,10 @@ android {
         viewBinding true
     }
 
+    testOptions {
+        unitTests.returnDefaultValues = true
+    }
+
     dependenciesInfo {
         includeInApk = false
         includeInBundle = false
