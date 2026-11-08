@@ -812,6 +812,30 @@ class StreamingService : LifecycleService() {
                 if (physicalId.isNotBlank() && physicalId != id) prefs.edit().putString("zoom_$physicalId", zStr).apply()
                 launchMain { backend?.setZoom(z) }
             }
+            "ptz" -> {
+                val ptz = EptzPresetManager.parsePtz(value) ?: return
+                val z = ptz.zoom
+                val zStr = String.format(Locale.US, "%.1f", z)
+                prefs.edit().putString("zoom_$id", zStr).apply()
+                if (physicalId.isNotBlank() && physicalId != id) prefs.edit().putString("zoom_$physicalId", zStr).apply()
+                launchMain { backend?.setZoom(z) }
+            }
+            "eptz_preset" -> {
+                val idx = value.toIntOrNull() ?: return
+                val mgr = EptzPresetManager(this)
+                val preset = mgr.getPreset(idx) ?: return
+                val z = preset.zoom
+                val zStr = String.format(Locale.US, "%.1f", z)
+                prefs.edit().putString("zoom_$id", zStr).apply()
+                if (physicalId.isNotBlank() && physicalId != id) prefs.edit().putString("zoom_$physicalId", zStr).apply()
+                launchMain { backend?.setZoom(z) }
+            }
+            "eptz_reset" -> {
+                val zStr = "1.0"
+                prefs.edit().putString("zoom_$id", zStr).apply()
+                if (physicalId.isNotBlank() && physicalId != id) prefs.edit().putString("zoom_$physicalId", zStr).apply()
+                launchMain { backend?.setZoom(1.0f) }
+            }
             "focus_distance" -> {
                 val f = value.toFloatOrNull() ?: return
                 if (f < 0f) {

@@ -147,6 +147,7 @@ class StreamingServerHelper(
         onClientDisconnected = onClientDisconnected,
         onControlCommand = onControlCommand
     )
+    val eptzPresetManager = EptzPresetManager(context)
 
     fun getClients(): List<Client> = clients.toList()
     fun hasWebSocketClients(): Boolean = webSocketHelper.hasClients()
@@ -648,6 +649,82 @@ class StreamingServerHelper(
                 return
             }
 
+            if (path == "/status" || path == "/api/eptz" || path == "/api/ptz/status") {
+                val statusObj = JSONObject(eptzPresetManager.getStatusJson())
+                statusObj.put("streaming", isStreamingEnabled())
+                val responseBody = statusObj.toString()
+                val responseBytes = responseBody.toByteArray(StandardCharsets.UTF_8)
+                writer.print("HTTP/1.1 200 OK\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: " + responseBytes.size + "\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Headers: *\r\nConnection: close\r\n\r\n")
+                writer.flush()
+                outputStream.write(responseBytes)
+                outputStream.flush()
+                try { socket.close() } catch (_: Exception) {}
+                return
+            }
+
+            if (path == "/control" || path.startsWith("/api/ptz")) {
+                val params = if (uri.contains("?")) parseQueryParams(uri) else emptyMap()
+                val ts = params["ts"]?.toLongOrNull() ?: 0L
+                if (params.containsKey("ptz")) {
+                    val ptz = EptzPresetManager.parsePtz(params["ptz"])
+                    if (ptz != null) {
+                        eptzPresetManager.setCurrentPosition(ptz.pan, ptz.tilt, ptz.zoom)
+                        onControlCommand("zoom", ptz.zoom.toString(), ts)
+                        onControlCommand("ptz", params["ptz"]!!, ts)
+                    }
+                } else if (params.containsKey("pan") || params.containsKey("tilt") || params.containsKey("zoom")) {
+                    val current = eptzPresetManager.getCurrentPosition()
+                    val ptz = EptzPresetManager.parseParams(params["pan"], params["tilt"], params["zoom"], current)
+                    if (ptz != null) {
+                        eptzPresetManager.setCurrentPosition(ptz.pan, ptz.tilt, ptz.zoom)
+                        if (params.containsKey("zoom")) onControlCommand("zoom", ptz.zoom.toString(), ts)
+                        if (params.containsKey("pan")) onControlCommand("pan", ptz.pan.toString(), ts)
+                        if (params.containsKey("tilt")) onControlCommand("tilt", ptz.tilt.toString(), ts)
+                    }
+                }
+                if (params.containsKey("eptz_preset") || params.containsKey("preset")) {
+                    val idx = (params["eptz_preset"] ?: params["preset"])?.toIntOrNull()
+                    if (idx != null && eptzPresetManager.isValidIndex(idx)) {
+                        val preset = eptzPresetManager.loadPreset(idx)
+                        if (preset != null) {
+                            onControlCommand("zoom", preset.zoom.toString(), ts)
+                            onControlCommand("eptz_preset", idx.toString(), ts)
+                        }
+                    }
+                }
+                if (params.containsKey("eptz_save") || path == "/api/ptz/save_preset") {
+                    val idx = (params["eptz_save"] ?: params["id"])?.toIntOrNull()
+                    if (idx != null && eptzPresetManager.isValidIndex(idx)) {
+                        val toSave = EptzPresetManager.parsePtz(params["ptz"]) ?: eptzPresetManager.getCurrentPosition()
+                        eptzPresetManager.savePreset(idx, toSave.pan, toSave.tilt, toSave.zoom)
+                        onControlCommand("eptz_save", idx.toString(), ts)
+                    }
+                }
+                if (params.containsKey("eptz_reset")) {
+                    val resetVal = params["eptz_reset"]
+                    if (resetVal == "all" || resetVal == "presets") {
+                        eptzPresetManager.reset()
+                    } else {
+                        eptzPresetManager.resetCurrentPosition()
+                    }
+                    onControlCommand("zoom", "1.0", ts)
+                    onControlCommand("eptz_reset", "1", ts)
+                }
+                params.forEach { (key, value) ->
+                    if (key !in listOf("ts", "ptz", "pan", "tilt", "zoom", "eptz_preset", "preset", "eptz_save", "id", "eptz_reset")) {
+                        onControlCommand(key, value, ts)
+                    }
+                }
+                val responseBody = eptzPresetManager.getStatusJson()
+                val responseBytes = responseBody.toByteArray(StandardCharsets.UTF_8)
+                writer.print("HTTP/1.1 200 OK\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: " + responseBytes.size + "\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Headers: *\r\nConnection: close\r\n\r\n")
+                writer.flush()
+                outputStream.write(responseBytes)
+                outputStream.flush()
+                try { socket.close() } catch (_: Exception) {}
+                return
+            }
+
             // Streaming on/off, so a home-automation system can stop the camera serving without
             // needing access to the device. Deliberately does NOT close the listening socket:
             // shutting the port would make /control/start unreachable and turning the camera back
@@ -737,11 +814,49 @@ class StreamingServerHelper(
                     return
                 }
 
+                                if (params.containsKey("ptz")) {
+                    val ptz = EptzPresetManager.parsePtz(params["ptz"])
+                    if (ptz != null) {
+                        eptzPresetManager.setCurrentPosition(ptz.pan, ptz.tilt, ptz.zoom)
+                        onControlCommand("zoom", ptz.zoom.toString(), ts)
+                    }
+                } else if (params.containsKey("pan") || params.containsKey("tilt") || params.containsKey("zoom")) {
+                    val current = eptzPresetManager.getCurrentPosition()
+                    val ptz = EptzPresetManager.parseParams(params["pan"], params["tilt"], params["zoom"], current)
+                    if (ptz != null) {
+                        eptzPresetManager.setCurrentPosition(ptz.pan, ptz.tilt, ptz.zoom)
+                        if (params.containsKey("zoom")) onControlCommand("zoom", ptz.zoom.toString(), ts)
+                    }
+                }
+                if (params.containsKey("eptz_preset")) {
+                    val idx = params["eptz_preset"]?.toIntOrNull()
+                    if (idx != null && eptzPresetManager.isValidIndex(idx)) {
+                        val preset = eptzPresetManager.loadPreset(idx)
+                        if (preset != null) onControlCommand("zoom", preset.zoom.toString(), ts)
+                    }
+                }
+                if (params.containsKey("eptz_save")) {
+                    val idx = params["eptz_save"]?.toIntOrNull()
+                    if (idx != null && eptzPresetManager.isValidIndex(idx)) {
+                        val toSave = EptzPresetManager.parsePtz(params["ptz"]) ?: eptzPresetManager.getCurrentPosition()
+                        eptzPresetManager.savePreset(idx, toSave.pan, toSave.tilt, toSave.zoom)
+                    }
+                }
+                if (params.containsKey("eptz_reset")) {
+                    val resetVal = params["eptz_reset"]
+                    if (resetVal == "all" || resetVal == "presets") {
+                        eptzPresetManager.reset()
+                    } else {
+                        eptzPresetManager.resetCurrentPosition()
+                    }
+                    onControlCommand("zoom", "1.0", ts)
+                }
+
                 params.forEach { (key, value) ->
                     if (key == "ts") return@forEach
                     onControlCommand(key, value, ts)
                 }
-                writer.print("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\nOK")
+                writer.print("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\nOK")
                 writer.flush()
                 socket.close()
                 return
