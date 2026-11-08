@@ -856,7 +856,11 @@ class StreamingService : LifecycleService() {
                 val zStr = "1.0"
                 prefs.edit().putString("zoom_$id", zStr).apply()
                 if (physicalId.isNotBlank() && physicalId != id) prefs.edit().putString("zoom_$physicalId", zStr).apply()
-                launchMain { backend?.setZoom(1.0f) }
+                eptzController.reset()
+                launchMain {
+                    backend?.setZoom(1.0f)
+                    applyEptzCrop()
+                }
             }
             "focus_distance" -> {
                 val f = value.toFloatOrNull() ?: return
@@ -892,10 +896,7 @@ class StreamingService : LifecycleService() {
                 eptzController.setZoom(z)
                 launchMain { applyEptzCrop() }
             }
-            "eptz_reset" -> {
-                eptzController.reset()
-                launchMain { applyEptzCrop() }
-            }
+
             "eptz_autoframing" -> {
                 val parts = value.split(",").mapNotNull { it.trim().toFloatOrNull() }
                 if (parts.size == 4) {
