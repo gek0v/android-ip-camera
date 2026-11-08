@@ -1880,7 +1880,7 @@ class StreamingServerHelper(
             cameraId = cameraId,
             resolution = prefs.getString("camera_resolution", "low") ?: "low",
             streamRes = prefs.getString("stream_res", "auto") ?: "auto",
-            fps = prefs.getString("stream_fps", "30") ?: "30",
+            fps = prefs.getString("stream_fps", "60") ?: "60",
             quality = prefs.getString("stream_quality", "85") ?: "85",
             bitrate = prefs.getString("stream_bitrate", "0") ?: "0",
             focusMode = prefs.getString("focus_mode", "continuous") ?: "continuous",

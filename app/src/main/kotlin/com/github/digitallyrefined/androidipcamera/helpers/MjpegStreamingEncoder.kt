@@ -69,12 +69,53 @@ class MjpegStreamingEncoder(
         { runnable -> Thread(runnable, "MjpegSecNetworkWriter").apply { isDaemon = true } }
     ).apply { allowCoreThreadTimeOut(true) }
 
+    private val encodeExecutor = ThreadPoolExecutor(
+        1,
+        1,
+        30L,
+        TimeUnit.SECONDS,
+        ArrayBlockingQueue(1),
+        { runnable -> Thread(runnable, "MjpegEncoder").apply { isDaemon = true } },
+        ThreadPoolExecutor.DiscardOldestPolicy()
+    ).apply { allowCoreThreadTimeOut(true) }
+
+    private val frameRateLimiter = FrameRateLimiter(60)
+
+    private val prefs = PreferenceManager.getDefaultSharedPreferences(context)
+    @Volatile private var cachedFps = prefs.getString("stream_fps", "60")?.toIntOrNull() ?: 60
+    @Volatile private var cachedQuality = prefs.getString("stream_quality", "85")?.toIntOrNull()
+        ?: DeviceMemoryHelper.defaultJpegQuality(context)
+    @Volatile private var cachedBitrate = prefs.getString("stream_bitrate", "0")?.toIntOrNull() ?: 0
+    @Volatile private var cachedCamId = prefs.getString("camera_id", null)
+    @Volatile private var cachedPipEnabled = prefs.getBoolean("pip_enabled", false)
+    @Volatile private var cachedDualMode = prefs.getString("dual_stream_mode", "separate") ?: "separate"
+    @Volatile private var cachedPipPos = prefs.getString("pip_position", "top-right") ?: "top-right"
+    @Volatile private var cachedPipScale = prefs.getString("pip_size", "0.28")?.toFloatOrNull() ?: 0.28f
+
+    private val prefChangeListener = android.content.SharedPreferences.OnSharedPreferenceChangeListener { p, key ->
+        when (key) {
+            "stream_fps" -> cachedFps = p.getString("stream_fps", "60")?.toIntOrNull() ?: 60
+            "stream_quality" -> cachedQuality = p.getString("stream_quality", "85")?.toIntOrNull()
+                ?: DeviceMemoryHelper.defaultJpegQuality(context)
+            "stream_bitrate" -> cachedBitrate = p.getString("stream_bitrate", "0")?.toIntOrNull() ?: 0
+            "camera_id" -> cachedCamId = p.getString("camera_id", null)
+            "pip_enabled" -> cachedPipEnabled = p.getBoolean("pip_enabled", false)
+            "dual_stream_mode" -> cachedDualMode = p.getString("dual_stream_mode", "separate") ?: "separate"
+            "pip_position" -> cachedPipPos = p.getString("pip_position", "top-right") ?: "top-right"
+            "pip_size" -> cachedPipScale = p.getString("pip_size", "0.28")?.toFloatOrNull() ?: 0.28f
+        }
+    }
+
     var isSceneStatic: (() -> Boolean)? = null
 
     init {
+        prefs.registerOnSharedPreferenceChangeListener(prefChangeListener)
         thermalGovernor?.addThermalStateListener {
             try {
                 networkWriter.execute {
+                    thermalGovernor?.applyEfficiencyThreadPriority()
+                }
+                encodeExecutor.execute {
                     thermalGovernor?.applyEfficiencyThreadPriority()
                 }
             } catch (_: Exception) {}
@@ -115,18 +156,18 @@ class MjpegStreamingEncoder(
         val helper = streamingServerHelper ?: return
         if (!helper.hasSecondaryClients()) return
 
-        val prefs = PreferenceManager.getDefaultSharedPreferences(context)
-        val fps = prefs.getString("stream_fps", "30")?.toIntOrNull() ?: 30
-        val configuredFps = fps.coerceIn(1, 60)
+        val fps = cachedFps
+        val configuredFps = fps.coerceIn(1, 120)
         val fpsCoerced = thermalGovernor?.effectiveFps(configuredFps) ?: configuredFps
-        val delay = try { 1000L / fpsCoerced } catch (_: Exception) { 33L }
+        val delay = try { 1000L / fpsCoerced } catch (_: Exception) { 16L }
         val currentTime = System.currentTimeMillis()
-        val minInterval = (delay - 8L).coerceAtLeast(0L)
+        val jitterTolerance = (delay * 0.35f).toLong().coerceIn(3L, 8L)
+        val minInterval = (delay - jitterTolerance).coerceAtLeast(0L)
 
         if (currentTime - lastSecFrameTime < minInterval) return
         lastSecFrameTime = currentTime
 
-        val camId = prefs.getString("camera_id", null)
+        val camId = cachedCamId ?: prefs.getString("camera_id", null)
         val rotation = if (camId != null) {
             val phys = camId.substringAfter(':', camId)
             when {
@@ -174,6 +215,7 @@ class MjpegStreamingEncoder(
         networkWriter.queue.clear()
         secWriterGeneration.incrementAndGet()
         secNetworkWriter.queue.clear()
+        encodeExecutor.queue.clear()
     }
 
     private fun prefStringWithFallback(prefs: android.content.SharedPreferences, vararg keys: String): String? {
@@ -219,28 +261,67 @@ class MjpegStreamingEncoder(
         return thermalGovernor?.effectiveQuality(baseQuality) ?: baseQuality
     }
 
+    fun processNv21FrameWithTimestamp(nv21: ByteArray, width: Int, height: Int, timestampNs: Long = 0L) {
+        if (!hasClients()) return
+
+        val configuredFps = cachedFps.coerceIn(1, 120)
+        val fpsCoerced = thermalGovernor?.effectiveFps(configuredFps) ?: configuredFps
+
+        // Pacing check: use hardware sensor timestamps when available, otherwise adaptive wall-clock
+        if (timestampNs > 0L) {
+            frameRateLimiter.targetFps = fpsCoerced
+            if (!frameRateLimiter.shouldEmit(timestampNs)) return
+        } else {
+            val delay = try { 1000L / fpsCoerced } catch (_: Exception) { 16L }
+            val currentTime = System.currentTimeMillis()
+            val jitterTolerance = (delay * 0.35f).toLong().coerceIn(3L, 8L)
+            val minInterval = (delay - jitterTolerance).coerceAtLeast(0L)
+            if (currentTime - lastFrameTime < minInterval) return
+            lastFrameTime = currentTime
+        }
+
+        val isStatic = isSceneStatic?.invoke() ?: false
+        if (thermalGovernor?.shouldSkipStaticFrame(isStatic) == true) {
+            return
+        }
+
+        try {
+            encodeExecutor.execute {
+                encodeNv21Core(nv21, width, height, fpsCoerced)
+            }
+        } catch (_: RejectedExecutionException) {}
+    }
+
+    /** Camera1 preview callback path (NV21 bytes, no ImageProxy). */
+    fun processNv21Frame(nv21: ByteArray, width: Int, height: Int) {
+        processNv21FrameWithTimestamp(nv21, width, height, 0L)
+    }
+
     override fun processFrame(image: ImageProxy) {
         if (!hasClients()) return
         try {
-            val prefs = PreferenceManager.getDefaultSharedPreferences(context)
-            val fps = prefs.getString("stream_fps", "30")?.toIntOrNull() ?: 30
-            val configuredFps = fps.coerceIn(1, 60)
-            val fpsCoerced = thermalGovernor?.effectiveFps(configuredFps) ?: configuredFps
-            val delay = try { 1000L / fpsCoerced } catch (_: Exception) { 33L }
-            val currentTime = System.currentTimeMillis()
-            // Jitter tolerance of 8ms ensures ~30fps camera frames (often arriving at 31-33ms) are not dropped to 15fps
-            val minInterval = (delay - 8L).coerceAtLeast(0L)
+            val crop = try { image.cropRect } catch (_: Throwable) { null }
+            val cropW = if (crop != null && crop.right > crop.left) ((crop.right - crop.left) / 2) * 2 else image.width
+            val cropH = if (crop != null && crop.bottom > crop.top) ((crop.bottom - crop.top) / 2) * 2 else image.height
+            val timestampNs = try { image.imageInfo.timestamp } catch (_: Throwable) { 0L }
 
-            if (currentTime - lastFrameTime < minInterval) return
-
-            val isStatic = isSceneStatic?.invoke() ?: false
-            if (thermalGovernor?.shouldSkipStaticFrame(isStatic) == true) {
-                lastFrameTime = currentTime
-                return
+            val nv21 = convertYUV420toNV21(image, nv21Buffer, nv21RowBuffer).also {
+                nv21Buffer = it
+                if (nv21RowBuffer == null || nv21RowBuffer!!.size < image.planes[0].rowStride) {
+                    nv21RowBuffer = ByteArray(image.planes[0].rowStride)
+                }
             }
-            lastFrameTime = currentTime
+            processNv21FrameWithTimestamp(nv21, cropW, cropH, timestampNs)
+        } catch (e: OutOfMemoryError) {
+            handleOutOfMemory("processFrame")
+        } catch (e: Exception) {
+            Log.e(TAG, "processFrame: ${e.message}")
+        }
+    }
 
-            val camId = prefs.getString("camera_id", null)
+    private fun encodeNv21Core(nv21: ByteArray, width: Int, height: Int, fpsCoerced: Int) {
+        try {
+            val camId = cachedCamId ?: prefs.getString("camera_id", null)
             val rotation = if (camId != null) {
                 val phys = camId.substringAfter(':', camId)
                 when {
@@ -264,20 +345,9 @@ class MjpegStreamingEncoder(
                 prefStringWithFallback(prefs, "mirror_$camId", "mirror_$phys")?.toBoolean() ?: isFrontCamera
             } else isFrontCamera
 
-            val crop = try { image.cropRect } catch (_: Throwable) { null }
-            val cropW = if (crop != null && crop.right > crop.left) ((crop.right - crop.left) / 2) * 2 else image.width
-            val cropH = if (crop != null && crop.bottom > crop.top) ((crop.bottom - crop.top) / 2) * 2 else image.height
-
-            val nv21 = convertYUV420toNV21(image, nv21Buffer, nv21RowBuffer).also {
-                nv21Buffer = it
-                if (nv21RowBuffer == null || nv21RowBuffer!!.size < image.planes[0].rowStride) {
-                    nv21RowBuffer = ByteArray(image.planes[0].rowStride)
-                }
-            }
-
             var workingNv21 = nv21
-            var curW = cropW
-            var curH = cropH
+            var curW = width
+            var curH = height
 
             // Native zero-bitmap rotation (saves ~25ms CPU time & 8MB RAM per frame, keeping Tensor cool)
             if (totalRotation != 0) {
@@ -298,8 +368,8 @@ class MjpegStreamingEncoder(
                 workingNv21 = mirroredNv21Buffer!!
             }
 
-            val pipEnabled = prefs.getBoolean("pip_enabled", false)
-            val dualMode = prefs.getString("dual_stream_mode", "separate") ?: "separate"
+            val pipEnabled = cachedPipEnabled
+            val dualMode = cachedDualMode
             if (pipEnabled && dualMode != "separate") {
                 var pBuf: ByteArray? = null
                 var pW = 0
@@ -331,9 +401,8 @@ class MjpegStreamingEncoder(
                         activePipH = rH
                     }
 
-                    val pipPos = prefs.getString("pip_position", "top-right") ?: "top-right"
-                    val pipSizeStr = prefs.getString("pip_size", "0.28") ?: "0.28"
-                    val pipScale = pipSizeStr.toFloatOrNull() ?: 0.28f
+                    val pipPos = cachedPipPos
+                    val pipScale = cachedPipScale
                     overlayNv21Pip(workingNv21, curW, curH, activePipBuf, activePipW, activePipH, pipPos, pipScale)
                 }
             }
@@ -346,128 +415,9 @@ class MjpegStreamingEncoder(
             lastFrameBytes = jpegBytes.size
             broadcastJpeg(jpegBytes)
         } catch (e: OutOfMemoryError) {
-            handleOutOfMemory("processFrame")
+            handleOutOfMemory("encodeNv21Core")
         } catch (e: Exception) {
-            Log.e(TAG, "processFrame: ${e.message}")
-        }
-    }
-
-    /** Camera1 preview callback path (NV21 bytes, no ImageProxy). */
-    fun processNv21Frame(nv21: ByteArray, width: Int, height: Int) {
-        if (!hasClients()) return
-        try {
-            val prefs = PreferenceManager.getDefaultSharedPreferences(context)
-            val fps = prefs.getString("stream_fps", "30")?.toIntOrNull() ?: 30
-            val configuredFps = fps.coerceIn(1, 60)
-            val fpsCoerced = thermalGovernor?.effectiveFps(configuredFps) ?: configuredFps
-            val delay = try { 1000L / fpsCoerced } catch (_: Exception) { 33L }
-            val currentTime = System.currentTimeMillis()
-            val minInterval = (delay - 8L).coerceAtLeast(0L)
-            if (currentTime - lastFrameTime < minInterval) return
-
-            val isStatic = isSceneStatic?.invoke() ?: false
-            if (thermalGovernor?.shouldSkipStaticFrame(isStatic) == true) {
-                lastFrameTime = currentTime
-                return
-            }
-            lastFrameTime = currentTime
-
-            val camId = prefs.getString("camera_id", null)
-            val rotation = if (camId != null) {
-                val phys = camId.substringAfter(':', camId)
-                when {
-                    prefs.contains("camera_rotate_$camId") -> prefs.getInt("camera_rotate_$camId", 0)
-                    prefs.contains("camera_rotate_$phys") -> prefs.getInt("camera_rotate_$phys", 0)
-                    else -> 0
-                }
-            } else 0
-            val totalRotation = ((rotation % 360) + 360) % 360
-            val scaleFactor = if (camId != null) {
-                val phys = camId.substringAfter(':', camId)
-                prefStringWithFallback(prefs, "stream_scale_$camId", "stream_scale_$phys")?.toFloatOrNull() ?: 1.0f
-            } else 1.0f
-            val contrastValue = if (camId != null) {
-                val phys = camId.substringAfter(':', camId)
-                prefStringWithFallback(prefs, "camera_contrast_$camId", "camera_contrast_$phys")?.toIntOrNull() ?: 0
-            } else 0
-            val mirror = if (camId != null) {
-                val phys = camId.substringAfter(':', camId)
-                prefStringWithFallback(prefs, "mirror_$camId", "mirror_$phys")?.toBoolean() ?: false
-            } else false
-
-            var workingNv21 = nv21
-            var curW = width
-            var curH = height
-
-            if (totalRotation != 0) {
-                if (rotatedNv21Buffer == null || rotatedNv21Buffer!!.size != nv21.size) {
-                    rotatedNv21Buffer = ByteArray(nv21.size)
-                }
-                val (newW, newH) = rotateNV21(workingNv21, curW, curH, totalRotation, rotatedNv21Buffer!!)
-                workingNv21 = rotatedNv21Buffer!!
-                curW = newW
-                curH = newH
-            }
-
-            if (mirror) {
-                if (mirroredNv21Buffer == null || mirroredNv21Buffer!!.size != nv21.size) {
-                    mirroredNv21Buffer = ByteArray(nv21.size)
-                }
-                mirrorNV21(workingNv21, curW, curH, mirroredNv21Buffer!!)
-                workingNv21 = mirroredNv21Buffer!!
-            }
-
-            val pipEnabled = prefs.getBoolean("pip_enabled", false)
-            val dualMode = prefs.getString("dual_stream_mode", "separate") ?: "separate"
-            if (pipEnabled && dualMode != "separate") {
-                var pBuf: ByteArray? = null
-                var pW = 0
-                var pH = 0
-                synchronized(pipLock) {
-                    val buf = pipNv21Buffer
-                    if (buf != null && (System.currentTimeMillis() - pipFrameTime) < 3000L && pipWidth > 0 && pipHeight > 0) {
-                        if (pipNv21WorkBuffer == null || pipNv21WorkBuffer!!.size != buf.size) {
-                            pipNv21WorkBuffer = ByteArray(buf.size)
-                        }
-                        System.arraycopy(buf, 0, pipNv21WorkBuffer!!, 0, buf.size)
-                        pBuf = pipNv21WorkBuffer
-                        pW = pipWidth
-                        pH = pipHeight
-                    }
-                }
-                if (pBuf != null) {
-                    var activePipBuf = pBuf
-                    var activePipW = pW
-                    var activePipH = pH
-
-                    if (totalRotation != 0) {
-                        if (pipRotatedBuffer == null || pipRotatedBuffer!!.size != activePipBuf.size) {
-                            pipRotatedBuffer = ByteArray(activePipBuf.size)
-                        }
-                        val (rW, rH) = rotateNV21(activePipBuf, activePipW, activePipH, totalRotation, pipRotatedBuffer!!)
-                        activePipBuf = pipRotatedBuffer!!
-                        activePipW = rW
-                        activePipH = rH
-                    }
-
-                    val pipPos = prefs.getString("pip_position", "top-right") ?: "top-right"
-                    val pipSizeStr = prefs.getString("pip_size", "0.28") ?: "0.28"
-                    val pipScale = pipSizeStr.toFloatOrNull() ?: 0.28f
-                    overlayNv21Pip(workingNv21, curW, curH, activePipBuf, activePipW, activePipH, pipPos, pipScale)
-                }
-            }
-
-            val quality = resolveQuality(prefs, fpsCoerced)
-            var jpegBytes = convertNV21toJPEG(workingNv21, curW, curH, quality)
-            if (scaleFactor != 1.0f || contrastValue != 0) {
-                jpegBytes = applyTransformations(jpegBytes, 0, scaleFactor, contrastValue, quality, false)
-            }
-            lastFrameBytes = jpegBytes.size
-            broadcastJpeg(jpegBytes)
-        } catch (e: OutOfMemoryError) {
-            handleOutOfMemory("processNv21Frame")
-        } catch (e: Exception) {
-            Log.e(TAG, "processNv21Frame: ${e.message}")
+            Log.e(TAG, "encodeNv21Core: ${e.message}")
         }
     }
 
@@ -618,7 +568,7 @@ class MjpegStreamingEncoder(
             }
             "fps" -> {
                 val fps = value.toIntOrNull() ?: return false
-                if (fps in 1..60) {
+                if (fps in 1..120) {
                     prefs.edit().putString("stream_fps", value).apply()
                     true
                 } else false

@@ -2,7 +2,18 @@ package com.github.digitallyrefined.androidipcamera.helpers
 
 /** Timestamp-based frame pacing for camera surfaces that produce faster than the encoder target. */
 internal class FrameRateLimiter(targetFps: Int) {
-    private val intervalNs = 1_000_000_000L / targetFps.coerceIn(1, 60)
+    @Volatile
+    var targetFps: Int = targetFps.coerceIn(1, 120)
+        set(value) {
+            val coerced = value.coerceIn(1, 120)
+            if (field != coerced) {
+                field = coerced
+                intervalNs = 1_000_000_000L / coerced
+                reset()
+            }
+        }
+
+    private var intervalNs = 1_000_000_000L / this.targetFps
     private var nextFrameNs = Long.MIN_VALUE
     private var lastTimestampNs = Long.MIN_VALUE
 

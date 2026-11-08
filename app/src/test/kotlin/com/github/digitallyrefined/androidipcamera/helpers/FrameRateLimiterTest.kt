@@ -41,4 +41,37 @@ class FrameRateLimiterTest {
 
         assertEquals(3, emitted)
     }
+
+    @Test
+    fun `allows 60 fps source to emit all 60 fps without dropping`() {
+        val limiter = FrameRateLimiter(60)
+        val emitted = (0 until 120).count { frame ->
+            limiter.shouldEmit(frame * 1_000_000_000L / 60)
+        }
+        assertEquals(120, emitted)
+    }
+
+    @Test
+    fun `paces a 120 fps high-speed source to 60 fps`() {
+        val limiter = FrameRateLimiter(60)
+        val emitted = (0 until 240).count { frame ->
+            limiter.shouldEmit(frame * 1_000_000_000L / 120)
+        }
+        assertTrue(emitted in 120..121)
+    }
+
+    @Test
+    fun `updates target FPS dynamically`() {
+        val limiter = FrameRateLimiter(30)
+        assertEquals(30, limiter.targetFps)
+
+        // Switch to 60 FPS
+        limiter.targetFps = 60
+        assertEquals(60, limiter.targetFps)
+
+        val emitted = (0 until 60).count { frame ->
+            limiter.shouldEmit(frame * 1_000_000_000L / 60)
+        }
+        assertEquals(60, emitted)
+    }
 }

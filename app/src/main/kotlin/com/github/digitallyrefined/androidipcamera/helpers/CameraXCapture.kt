@@ -61,7 +61,8 @@ class CameraXCapture(
     private val previewSurfaceProvider: Preview.SurfaceProvider? = null,
     private val encoderSurfaceProvider: Preview.SurfaceProvider? = null,
     private val onEncoderSurfaceFallback: (() -> Unit)? = null,
-    private val onFrame: (ImageProxy) -> Unit
+    private val targetFps: Int = 60,
+    private val onFrame: (ImageProxy) -> Unit = {}
 ) : CaptureBackend {
     @Volatile override var width = desired.width; private set
     @Volatile override var height = desired.height; private set
@@ -83,6 +84,32 @@ class CameraXCapture(
 
     fun setPipFrameCallback(cb: ((ByteArray, Int, Int) -> Unit)?) {
         onPipFrameCallback = cb
+    }
+
+    private class Nv21BufferPool(private val poolSize: Int = 3) {
+        private var buffers: Array<ByteArray>? = null
+        private var bufferSize = 0
+        private var nextIdx = 0
+
+        @Synchronized
+        fun acquire(size: Int): ByteArray {
+            if (buffers == null || bufferSize != size) {
+                buffers = Array(poolSize) { ByteArray(size) }
+                bufferSize = size
+                nextIdx = 0
+            }
+            val buf = buffers!![nextIdx]
+            nextIdx = (nextIdx + 1) % poolSize
+            return buf
+        }
+    }
+
+    private val primaryBufferPool = Nv21BufferPool(3)
+    private var primaryNv21RowBuffer: ByteArray? = null
+    @Volatile private var onNv21FrameCallback: ((ByteArray, Int, Int, Long) -> Unit)? = null
+
+    fun setNv21FrameCallback(cb: ((ByteArray, Int, Int, Long) -> Unit)?) {
+        onNv21FrameCallback = cb
     }
 
     fun hasConcurrentSupport(): Boolean = try {
@@ -169,7 +196,7 @@ class CameraXCapture(
                 val selBuilder = ResolutionSelector.Builder()
                     .setAspectRatioStrategy(AspectRatioStrategy(ratio, AspectRatioStrategy.FALLBACK_RULE_AUTO))
                     .setResolutionStrategy(ResolutionStrategy(desired, ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER_THEN_LOWER))
-                if (!isPixelOrTensor) {
+                if (targetFps < 60 && !isPixelOrTensor) {
                     selBuilder.setAllowedResolutionMode(ResolutionSelector.PREFER_HIGHER_RESOLUTION_OVER_CAPTURE_RATE)
                 }
                 val sel = selBuilder.build()
@@ -183,39 +210,46 @@ class CameraXCapture(
                     .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                     .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_YUV_420_888)
                 val analysisInterop = Camera2Interop.Extender(aBuilder)
-                physicalCameraId?.let { analysisInterop.setPhysicalCameraId(it) }
-                // Some legacy HALs (e.g. this phone's rear cam) stall the analysis stream unless an AE
-                // target FPS range is set. Use the WIDEST advertised range, not a fixed lock — AE stays
-                // fully auto (drops low for light in the dark, up to 30 in good light).
-                aeFpsRange()?.let {
-                    analysisInterop.setCaptureRequestOption(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, it)
-                    Log.i(TAG, "AE fps range $it (auto within range)")
-                }
-
-                // Google Pixel Tensor & Low-Latency optimizations:
-                // 1. Disable EIS to eliminate 60-120ms multi-frame queue delay and preserve native sensor FOV
-                analysisInterop.setCaptureRequestOption(CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE, CameraMetadata.CONTROL_VIDEO_STABILIZATION_MODE_OFF)
-                try {
-                    analysisInterop.setCaptureRequestOption(CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE, CameraMetadata.LENS_OPTICAL_STABILIZATION_MODE_OFF)
-                } catch (_: Exception) {}
-
-                // 2. Fast single-pass noise reduction and edge enhancement (avoids heavy multi-frame temporal blending in Tensor ISP)
-                analysisInterop.setCaptureRequestOption(CaptureRequest.NOISE_REDUCTION_MODE, CameraMetadata.NOISE_REDUCTION_MODE_FAST)
-                analysisInterop.setCaptureRequestOption(CaptureRequest.EDGE_MODE, CameraMetadata.EDGE_MODE_FAST)
-                analysisInterop.setCaptureRequestOption(CaptureRequest.HOT_PIXEL_MODE, CameraMetadata.HOT_PIXEL_MODE_FAST)
-                analysisInterop.setCaptureRequestOption(CaptureRequest.CONTROL_SCENE_MODE, CameraMetadata.CONTROL_SCENE_MODE_DISABLED)
-
-                // 3. Smooth continuous video auto-focus
-                analysisInterop.setCaptureRequestOption(CaptureRequest.CONTROL_AF_MODE, CameraMetadata.CONTROL_AF_MODE_CONTINUOUS_VIDEO)
+                applyCaptureOptimizations(analysisInterop)
 
                 analysisUseCase = aBuilder.build()
                     .also { a -> a.setAnalyzer(analysisExec) { img ->
-                        val crop = try { img.cropRect } catch (_: Throwable) { null }
-                        val cropW = if (crop != null && crop.right > crop.left) ((crop.right - crop.left) / 2) * 2 else img.width
-                        val cropH = if (crop != null && crop.bottom > crop.top) ((crop.bottom - crop.top) / 2) * 2 else img.height
-                        width = cropW; height = cropH
-                        hasProducedFrame = true
-                        onFrame(img)
+                        try {
+                            val crop = try { img.cropRect } catch (_: Throwable) { null }
+                            val cropW = if (crop != null && crop.right > crop.left) ((crop.right - crop.left) / 2) * 2 else img.width
+                            val cropH = if (crop != null && crop.bottom > crop.top) ((crop.bottom - crop.top) / 2) * 2 else img.height
+                            width = cropW; height = cropH
+                            hasProducedFrame = true
+                            val timestampNs = try { img.imageInfo.timestamp } catch (_: Throwable) { System.nanoTime() }
+
+                            val cb = onNv21FrameCallback
+                            if (cb != null) {
+                                val reqSize = (cropW * cropH * 3) / 2
+                                val nv21 = primaryBufferPool.acquire(reqSize)
+                                convertYUV420toNV21(img, nv21, primaryNv21RowBuffer).also {
+                                    if (primaryNv21RowBuffer == null || primaryNv21RowBuffer!!.size < img.planes[0].rowStride) {
+                                        primaryNv21RowBuffer = ByteArray(img.planes[0].rowStride)
+                                    }
+                                }
+                                synchronized(nv21Lock) {
+                                    if (nv21Buffer == null || nv21Buffer!!.size != nv21.size) {
+                                        nv21Buffer = ByteArray(nv21.size)
+                                    }
+                                    System.arraycopy(nv21, 0, nv21Buffer!!, 0, nv21.size)
+                                    latestNv21 = nv21Buffer
+                                    latestNv21W = cropW
+                                    latestNv21H = cropH
+                                    latestNv21AtMs = System.currentTimeMillis()
+                                }
+                                cb.invoke(nv21, cropW, cropH, timestampNs)
+                            } else {
+                                onFrame(img)
+                            }
+                        } catch (e: Throwable) {
+                            Log.e(TAG, "analyzer: ${e.message}")
+                        } finally {
+                            img.close()
+                        }
                     } }
                 // ImageCapture stays co-bound from start(): a still then snaps straight from the bound
                 // use case, avoiding the per-shot unbind/rebind that hangs the session configuration on
@@ -229,13 +263,13 @@ class CameraXCapture(
                 previewSurfaceProvider?.let { pv ->
                     val previewBuilder = Preview.Builder().setResolutionSelector(sel)
                         .setTargetRotation(Surface.ROTATION_0)
-                    physicalCameraId?.let { Camera2Interop.Extender(previewBuilder).setPhysicalCameraId(it) }
+                    applyCaptureOptimizations(Camera2Interop.Extender(previewBuilder))
                     previewUseCase = previewBuilder.build().also { it.setSurfaceProvider(pv) }
                 }
                 encoderSurfaceProvider?.let { pv ->
                     val previewBuilder = Preview.Builder().setResolutionSelector(sel)
                         .setTargetRotation(Surface.ROTATION_0)
-                    physicalCameraId?.let { Camera2Interop.Extender(previewBuilder).setPhysicalCameraId(it) }
+                    applyCaptureOptimizations(Camera2Interop.Extender(previewBuilder))
                     encoderUseCase = previewBuilder.build().also { it.setSurfaceProvider(pv) }
                 }
                 boundSelector = logicalCameraId?.let { requestedId ->
@@ -652,19 +686,76 @@ class CameraXCapture(
         applyCamera2Options()
     }
 
-    /** The camera's WIDEST advertised AE FPS range — leaves auto-exposure fully free while giving legacy
-     *  HALs the explicit range they need to not stall the analysis stream. Not a fixed-fps lock. */
-    /** Prefers AE target ranges with high lower bounds (e.g. [30, 30] or [24, 30]) so Tensor/HAL doesn't throttle shutter to 15fps in normal indoor lighting. */
-    private fun aeFpsRange(): Range<Int>? = try {
+    @OptIn(ExperimentalCamera2Interop::class)
+    private fun applyCaptureOptimizations(interop: Camera2Interop.Extender<*>) {
+        physicalCameraId?.let { interop.setPhysicalCameraId(it) }
+
+        // 1. High-speed AE target FPS range targeting 60fps (or user target) when supported
+        aeFpsRange(targetFps)?.let {
+            interop.setCaptureRequestOption(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, it)
+            Log.i(TAG, "AE fps range $it (targetFps=$targetFps)")
+        }
+
+        // 2. Set capture intent to PREVIEW to eliminate exposure search delays & prevent HAL from dropping FPS
+        interop.setCaptureRequestOption(
+            CaptureRequest.CONTROL_CAPTURE_INTENT,
+            CameraMetadata.CONTROL_CAPTURE_INTENT_PREVIEW
+        )
+
+        // 3. Auto-exposure & auto-white-balance: lock into active auto modes without pre-flash sweeps
+        interop.setCaptureRequestOption(CaptureRequest.CONTROL_MODE, CameraMetadata.CONTROL_MODE_AUTO)
+        interop.setCaptureRequestOption(CaptureRequest.CONTROL_AE_MODE, CameraMetadata.CONTROL_AE_MODE_ON)
+        interop.setCaptureRequestOption(
+            CaptureRequest.CONTROL_AE_PRECAPTURE_TRIGGER,
+            CameraMetadata.CONTROL_AE_PRECAPTURE_TRIGGER_IDLE
+        )
+        interop.setCaptureRequestOption(CaptureRequest.CONTROL_AWB_MODE, CameraMetadata.CONTROL_AWB_MODE_AUTO)
+
+        // 4. Disable EIS to eliminate 60-120ms multi-frame queue delay and preserve native sensor FOV
+        interop.setCaptureRequestOption(
+            CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE,
+            CameraMetadata.CONTROL_VIDEO_STABILIZATION_MODE_OFF
+        )
+        try {
+            interop.setCaptureRequestOption(
+                CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE,
+                CameraMetadata.LENS_OPTICAL_STABILIZATION_MODE_OFF
+            )
+        } catch (_: Exception) {}
+
+        // 5. Fast single-pass ISP pipeline: disable multi-frame temporal noise reduction and face tracking DSP
+        interop.setCaptureRequestOption(CaptureRequest.NOISE_REDUCTION_MODE, CameraMetadata.NOISE_REDUCTION_MODE_FAST)
+        interop.setCaptureRequestOption(CaptureRequest.EDGE_MODE, CameraMetadata.EDGE_MODE_FAST)
+        interop.setCaptureRequestOption(CaptureRequest.HOT_PIXEL_MODE, CameraMetadata.HOT_PIXEL_MODE_FAST)
+        interop.setCaptureRequestOption(CaptureRequest.TONEMAP_MODE, CameraMetadata.TONEMAP_MODE_FAST)
+        interop.setCaptureRequestOption(CaptureRequest.SHADING_MODE, CameraMetadata.SHADING_MODE_FAST)
+        interop.setCaptureRequestOption(CaptureRequest.COLOR_CORRECTION_MODE, CameraMetadata.COLOR_CORRECTION_MODE_FAST)
+        interop.setCaptureRequestOption(CaptureRequest.STATISTICS_FACE_DETECT_MODE, CameraMetadata.STATISTICS_FACE_DETECT_MODE_OFF)
+        interop.setCaptureRequestOption(CaptureRequest.CONTROL_SCENE_MODE, CameraMetadata.CONTROL_SCENE_MODE_DISABLED)
+
+        // 6. Smooth continuous video auto-focus
+        interop.setCaptureRequestOption(CaptureRequest.CONTROL_AF_MODE, CameraMetadata.CONTROL_AF_MODE_CONTINUOUS_VIDEO)
+    }
+
+    /** Prefers AE target ranges with upper bound matching or exceeding targetFps (e.g. [30, 60] or [60, 60])
+     *  so sensor operates at 60fps on supported hardware, falling back cleanly to 30fps. */
+    private fun aeFpsRange(targetFps: Int = 60): Range<Int>? = try {
         val cm = ctx.getSystemService(Context.CAMERA_SERVICE) as CameraManager
         val want = if (front) CameraCharacteristics.LENS_FACING_FRONT else CameraCharacteristics.LENS_FACING_BACK
         val id = logicalCameraId?.takeIf { it in cm.cameraIdList }
             ?: cm.cameraIdList.firstOrNull { cm.getCameraCharacteristics(it).get(CameraCharacteristics.LENS_FACING) == want }
             ?: cm.cameraIdList.first()
         val ranges = cm.getCameraCharacteristics(id).get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES) ?: return null
-        ranges.firstOrNull { it.lower >= 30 && it.upper >= 30 }
-            ?: ranges.filter { it.upper >= 30 }.maxByOrNull { it.lower }
-            ?: ranges.maxWithOrNull(compareBy({ it.upper - it.lower }, { it.upper }))
+        val target = targetFps.coerceAtLeast(30)
+        val highFpsRanges = ranges.filter { it.upper >= target }
+        if (highFpsRanges.isNotEmpty()) {
+            highFpsRanges.firstOrNull { it.lower >= target }
+                ?: highFpsRanges.maxByOrNull { it.lower }
+        } else {
+            ranges.firstOrNull { it.lower >= 30 && it.upper >= 30 }
+                ?: ranges.filter { it.upper >= 30 }.maxByOrNull { it.lower }
+                ?: ranges.maxWithOrNull(compareBy({ it.upper - it.lower }, { it.upper }))
+        }
     } catch (e: Exception) { Log.e(TAG, "aeRange: ${e.message}"); null }
 
     override fun stop() {
