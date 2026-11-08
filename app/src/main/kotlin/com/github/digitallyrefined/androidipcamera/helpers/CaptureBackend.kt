@@ -18,6 +18,9 @@ interface CaptureBackend {
     fun setZoom(ratio: Float)
     fun triggerAutoFocus()
     fun focusOnPoint(x: Float, y: Float) { triggerAutoFocus() }
+    fun focusAndLock(x: Float, y: Float) { focusOnPoint(x, y) }
+    fun unlockFocus() {}
+    fun isFocusLocked(): Boolean = false
     fun setFocusMode(mode: String) {}
     /**
      * Manual focus. [distance] in 0f..1f is a normalized fixed focus distance

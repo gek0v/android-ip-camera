@@ -556,7 +556,14 @@ class StreamingServerHelper(
             val queryParams = parseQueryParams(uri)
             val queryUser = queryParams["user"] ?: queryParams["username"]
             val queryPass = queryParams["pass"] ?: queryParams["password"]
-            val hasValidQueryAuth = queryUser != null && queryPass != null && queryUser == username && queryPass == password
+            val queryAuth = queryParams["auth"] ?: queryParams["token"]
+            val hasValidTokenAuth = if (queryAuth != null) {
+                try {
+                    val decoded = String(Base64.decode(queryAuth, Base64.DEFAULT)).trim()
+                    decoded == "$username:$password"
+                } catch (_: Exception) { false }
+            } else false
+            val hasValidQueryAuth = (queryUser != null && queryPass != null && queryUser == username && queryPass == password) || hasValidTokenAuth
 
             if (enableAuth && !hasValidQueryAuth) {
                 if (authHeaderPair == null) {
@@ -738,10 +745,10 @@ class StreamingServerHelper(
                 }
 
                 params.forEach { (key, value) ->
-                    if (key == "ts") return@forEach
+                    if (key == "ts" || key in listOf("user", "pass", "username", "password", "auth", "token")) return@forEach
                     onControlCommand(key, value, ts)
                 }
-                writer.print("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\nOK")
+                writer.print("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nConnection: close\r\n\r\nOK")
                 writer.flush()
                 socket.close()
                 return
@@ -967,9 +974,29 @@ class StreamingServerHelper(
             }
 
             if (path == "/obs" || path == "/view") {
-                val obsHtml = "<!DOCTYPE html><html><head><meta charset=\"utf-8\"><title>OBS Stream</title><style>html,body{margin:0;padding:0;width:100%;height:100%;background:#000;overflow:hidden;display:flex;align-items:center;justify-content:center;}img{width:100%;height:100%;object-fit:contain;}</style></head><body><img src=\"/video/mjpeg\" alt=\"Stream\"></body></html>"
+                val queryParams = parseQueryParams(uri)
+                val fit = queryParams["fit"]?.takeIf { it in listOf("contain", "cover", "fill") } ?: "contain"
+                val rotate = queryParams["rotate"]?.toIntOrNull() ?: 0
+                val flip = queryParams["flip"]?.lowercase()
+
+                // Preserve auth and other query parameters for the /video/mjpeg stream element
+                val imgQuery = if (uri.contains("?")) "?" + uri.substringAfter("?") else ""
+
+                val transformStyle = buildString {
+                    if (rotate != 0) append("rotate(${rotate}deg) ")
+                    if (flip == "h" || flip == "horizontal") append("scaleX(-1) ")
+                    else if (flip == "v" || flip == "vertical") append("scaleY(-1) ")
+                    else if (flip == "both") append("scale(-1, -1) ")
+                }.trim()
+
+                val imgStyle = buildString {
+                    append("width:100%;height:100%;object-fit:${fit};")
+                    if (transformStyle.isNotEmpty()) append("transform:${transformStyle};")
+                }
+
+                val obsHtml = "<!DOCTYPE html><html><head><meta charset=\"utf-8\"><title>OBS Stream</title><style>html,body{margin:0;padding:0;width:100%;height:100%;background:#000;overflow:hidden;display:flex;align-items:center;justify-content:center;}img{${imgStyle}}</style></head><body><img src=\"/video/mjpeg${imgQuery}\" alt=\"Stream\"></body></html>"
                 val obsBytes = obsHtml.toByteArray(StandardCharsets.UTF_8)
-                writer.print("HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: " + obsBytes.size + "\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n")
+                writer.print("HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: " + obsBytes.size + "\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Headers: *\r\nCache-Control: no-cache, no-store, must-revalidate\r\nConnection: close\r\n\r\n")
                 writer.flush()
                 outputStream.write(obsBytes)
                 outputStream.flush()
@@ -1474,6 +1501,7 @@ class StreamingServerHelper(
         val quality: String,
         val bitrate: String,
         val focusMode: String,
+        val focusLocked: Boolean = false,
         val torch: String,
         val deviceHasFlash: Boolean,
         val audioGain: String,
@@ -1544,6 +1572,7 @@ class StreamingServerHelper(
                 put("quality", settings.quality)
                 put("bitrate", settings.bitrate)
                 put("focusMode", settings.focusMode)
+                put("focusLocked", settings.focusLocked)
                 put("torch", settings.torch)
                 // Whether ANY rear lens can drive the flash — the torch is a device-level unit,
                 // so the UI may offer it even when the selected camera reports none.
@@ -1700,6 +1729,7 @@ class StreamingServerHelper(
             quality = prefs.getString("stream_quality", "85") ?: "85",
             bitrate = prefs.getString("stream_bitrate", "0") ?: "0",
             focusMode = prefs.getString("focus_mode", "continuous") ?: "continuous",
+            focusLocked = prefs.getBoolean("focus_locked", false),
             torch = prefs.getString("camera_torch", "off") ?: "off",
             deviceHasFlash = anyBackCameraWithFlash(),
             audioGain = prefs.getString("audio_gain", "1.0") ?: "1.0",
