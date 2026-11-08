@@ -994,6 +994,9 @@
             <input type="checkbox" id="pipCheckbox" onchange="onPipToggle(this.checked)">
             <span>Enable Front &amp; Back Dual Streaming</span>
           </label>
+          <div id="pipUnsupportedMsg" style="display:none; color:var(--text-dim); font-size:11px; margin-top:6px; line-height:1.4;">
+            ⚠️ Dual camera requires hardware concurrent support (FEATURE_CAMERA_CONCURRENT), not supported by this device.
+          </div>
 
           <div id="pipControlsRow" class="grid-2" style="display:none; margin-top:4px;">
             <div class="control-row">
@@ -1958,14 +1961,34 @@
                 btn.classList.add('btn-warning');
               }
             }
-            if (s.pipEnabled !== undefined) {
-              const chk = getEl('pipCheckbox');
+            const hasConcurrent = (data.hasConcurrentCameras !== false) && (s.hasConcurrentCameras !== false);
+            const chk = getEl('pipCheckbox');
+            const row = getEl('pipControlsRow');
+            const badge = getEl('pipStateBadge');
+            const unsuppMsg = getEl('pipUnsupportedMsg');
+
+            if (!hasConcurrent) {
               if (chk) {
+                chk.checked = false;
+                chk.disabled = true;
+              }
+              if (badge) {
+                badge.textContent = 'Unsupported';
+                badge.style.color = 'var(--text-dim)';
+                badge.title = 'Device hardware does not support simultaneous dual cameras';
+              }
+              if (row) row.style.display = 'none';
+              if (unsuppMsg) unsuppMsg.style.display = 'block';
+            } else {
+              if (chk) chk.disabled = false;
+              if (unsuppMsg) unsuppMsg.style.display = 'none';
+              if (s.pipEnabled !== undefined && chk) {
                 chk.checked = !!s.pipEnabled;
-                const row = getEl('pipControlsRow');
                 if (row) row.style.display = chk.checked ? 'grid' : 'none';
-                const badge = getEl('pipStateBadge');
-                if (badge) badge.textContent = chk.checked ? 'Dual PiP' : 'Single';
+                if (badge) {
+                  badge.textContent = chk.checked ? 'Dual PiP' : 'Single';
+                  badge.style.color = chk.checked ? 'var(--accent)' : 'var(--muted)';
+                }
               }
             }
             if (s.pipPosition) {
