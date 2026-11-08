@@ -7,8 +7,15 @@ import androidx.camera.core.ImageProxy
 import java.io.ByteArrayOutputStream
 import java.nio.ByteBuffer
 
+// Direct buffer output stream with preallocated capacity to avoid GC churn and buffer reallocation during 1080p streaming
+class DirectBufferOutputStream(initialCapacity: Int = 512 * 1024) : ByteArrayOutputStream(initialCapacity) {
+    fun getBuffer(): ByteArray = buf
+    fun getLength(): Int = count
+    fun copyToTrimmedByteArray(): ByteArray = toByteArray()
+}
+
 // Thread-local reusable output stream: eliminates memory churn and GC pauses (critical for sustained FPS on Tensor)
-private val threadLocalJpegStream = ThreadLocal.withInitial { ByteArrayOutputStream(384 * 1024) }
+private val threadLocalJpegStream = ThreadLocal.withInitial { DirectBufferOutputStream(512 * 1024) }
 
 fun convertYUV420toNV21(image: ImageProxy, reuse: ByteArray? = null, reuseRow: ByteArray? = null): ByteArray {
     val accelerated = try {
@@ -21,14 +28,13 @@ fun convertYUV420toNV21(image: ImageProxy, reuse: ByteArray? = null, reuseRow: B
     }
 
     val crop: Rect? = try { image.cropRect } catch (_: Throwable) { null }
-    val format: Int = image.format
     val width: Int = if (crop != null && crop.right > crop.left) crop.right - crop.left else image.width
     val height: Int = if (crop != null && crop.bottom > crop.top) crop.bottom - crop.top else image.height
     val cropTop: Int = crop?.top ?: 0
     val cropLeft: Int = crop?.left ?: 0
     val planes: Array<ImageProxy.PlaneProxy> = image.planes
     val requiredSize = (width * height * 3) / 2
-    val data = if (reuse != null && reuse.size == requiredSize) reuse else ByteArray(requiredSize)
+    val data = if (reuse != null && reuse.size >= requiredSize) reuse else ByteArray(requiredSize)
     val rowStride = planes[0].rowStride
     val rowData = if (reuseRow != null && reuseRow.size >= rowStride) reuseRow else ByteArray(rowStride)
 
@@ -111,7 +117,7 @@ fun convertYUV420toNV21(image: ImageProxy, reuse: ByteArray? = null, reuseRow: B
 }
 
 fun convertNV21toJPEG(nv21: ByteArray, width: Int, height: Int, quality: Int = 80): ByteArray {
-    val out = threadLocalJpegStream.get() ?: ByteArrayOutputStream(384 * 1024)
+    val out = threadLocalJpegStream.get() ?: DirectBufferOutputStream(512 * 1024)
     out.reset()
     val yuv = YuvImage(nv21, ImageFormat.NV21, width, height, null)
     yuv.compressToJpeg(Rect(0, 0, width, height), quality, out)
@@ -121,12 +127,17 @@ fun convertNV21toJPEG(nv21: ByteArray, width: Int, height: Int, quality: Int = 8
 /**
  * Fast in-place NV21 byte buffer rotation (90°, 180°, 270°).
  * Eliminates the need to decode JPEG to Bitmap and re-encode, saving ~25ms per frame and ~8MB RAM.
+ * Vectorized via ARM NEON and cache-tiled block transposition.
  */
 fun rotateNV21(src: ByteArray, width: Int, height: Int, rotation: Int, dest: ByteArray): Pair<Int, Int> {
     val norm = ((rotation % 360) + 360) % 360
     if (norm == 0) {
-        System.arraycopy(src, 0, dest, 0, src.size)
+        System.arraycopy(src, 0, dest, 0, width * height * 3 / 2)
         return Pair(width, height)
+    }
+
+    if (NativeImagePipeline.rotateNV21(src, dest, width, height, norm)) {
+        return if (norm == 90 || norm == 270) Pair(height, width) else Pair(width, height)
     }
 
     val frameSize = width * height
@@ -183,7 +194,7 @@ fun rotateNV21(src: ByteArray, width: Int, height: Int, rotation: Int, dest: Byt
             return Pair(height, width)
         }
         else -> {
-            System.arraycopy(src, 0, dest, 0, src.size)
+            System.arraycopy(src, 0, dest, 0, width * height * 3 / 2)
             return Pair(width, height)
         }
     }
@@ -191,8 +202,13 @@ fun rotateNV21(src: ByteArray, width: Int, height: Int, rotation: Int, dest: Byt
 
 /**
  * Fast in-place NV21 horizontal mirror.
+ * Vectorized via ARM NEON and 64-bit block operations.
  */
 fun mirrorNV21(src: ByteArray, width: Int, height: Int, dest: ByteArray) {
+    if (NativeImagePipeline.mirrorNV21(src, dest, width, height)) {
+        return
+    }
+
     val frameSize = width * height
     for (row in 0 until height) {
         val rowOffset = row * width
