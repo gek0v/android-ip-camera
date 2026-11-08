@@ -31,28 +31,20 @@ object DeviceMemoryHelper {
     fun isSevereMemoryPressure(): Boolean =
         memoryPressureLevel >= ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW
 
-    fun h264WriterQueueCapacity(context: Context): Int =
-        when {
-            isSevereMemoryPressure() -> 4
-            isLowRamDevice(context) || isUnderMemoryPressure() -> 8
-            else -> 30
-        }
-
-    /** Frames (video access units + AAC frames) buffered per RTSP session before it skips ahead. */
-    fun rtspSendQueueCapacity(context: Context): Int =
-        if (isLowRamDevice(context)) 64 else 256
-
+    /** Ultra-low-latency writer queue: keeps queue minimal so fresh frames are always prioritized */
     fun mjpegWriterQueueCapacity(context: Context): Int =
-        if (isLowRamDevice(context) || isUnderMemoryPressure()) 2 else 3
+        if (isLowRamDevice(context) || isUnderMemoryPressure()) 1 else 2
 
     /** Full-res snapshot JPEGs above this size are not cached in RAM. */
     fun maxSnapshotBytes(context: Context): Int =
         if (isLowRamDevice(context) || isUnderMemoryPressure()) 512 * 1024 else 2 * 1024 * 1024
 
-    fun mjpegJpegQuality(context: Context): Int =
+    fun defaultJpegQuality(context: Context): Int =
         when {
-            isSevereMemoryPressure() -> 60
-            isLowRamDevice(context) || isUnderMemoryPressure() -> 70
-            else -> 80
+            isSevereMemoryPressure() -> 65
+            isLowRamDevice(context) || isUnderMemoryPressure() -> 75
+            else -> 85
         }
+
+    fun mjpegJpegQuality(context: Context): Int = defaultJpegQuality(context)
 }

@@ -3,44 +3,202 @@
 
 <head>
   <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
   <title>Android IP Camera</title>
   <style>
+    :root {
+      --bg-base: #0c0e14;
+      --bg-panel: #141722;
+      --bg-card: #1b2030;
+      --bg-card-hover: #22283d;
+      --border: #283046;
+      --border-focus: #3b82f6;
+      --text: #f1f5f9;
+      --text-muted: #94a3b8;
+      --text-dim: #64748b;
+      --primary: #3b82f6;
+      --primary-hover: #2563eb;
+      --primary-active: #1d4ed8;
+      --accent: #06b6d4;
+      --success: #10b981;
+      --danger: #ef4444;
+      --danger-hover: #dc2626;
+      --radius: 10px;
+      --radius-sm: 6px;
+      --transition: all 0.15s ease-in-out;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
     body {
-      background: #121212;
-      color: #fff;
-      font-family: sans-serif;
+      background: var(--bg-base);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
       margin: 0;
+      padding: 0;
       display: flex;
       flex-direction: column;
       height: 100vh;
       overflow: hidden;
+      -webkit-font-smoothing: antialiased;
     }
 
-    a {
-      color: #459eff;
-      text-decoration: none;
-    }
-
-    a:hover {
-      text-decoration: underline;
-    }
-
+    /* Top Navigation Bar */
     .header {
-      padding: 10px 20px;
-      background: #1e1e1e;
-      border-bottom: 1px solid #333;
+      padding: 10px 18px;
+      background: var(--bg-panel);
+      border-bottom: 1px solid var(--border);
       display: flex;
       justify-content: space-between;
       align-items: center;
-      z-index: 10;
+      z-index: 20;
+      flex-shrink: 0;
     }
 
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .brand-icon {
+      width: 28px;
+      height: 28px;
+      background: linear-gradient(135deg, var(--primary), var(--accent));
+      border-radius: 8px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 15px;
+      box-shadow: 0 2px 8px rgba(59, 130, 246, 0.4);
+    }
+
+    .brand h1 {
+      margin: 0;
+      font-size: 16px;
+      font-weight: 700;
+      letter-spacing: -0.3px;
+      color: #fff;
+    }
+
+    .live-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      padding: 3px 8px;
+      background: rgba(16, 185, 129, 0.15);
+      border: 1px solid rgba(16, 185, 129, 0.3);
+      color: var(--success);
+      border-radius: 12px;
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+
+    .live-dot {
+      width: 6px;
+      height: 6px;
+      background: var(--success);
+      border-radius: 50%;
+      animation: pulse 1.5s infinite;
+    }
+
+    @keyframes pulse {
+      0% { opacity: 1; transform: scale(1); }
+      50% { opacity: 0.4; transform: scale(1.2); }
+      100% { opacity: 1; transform: scale(1); }
+    }
+
+    .header-actions {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    /* Buttons */
+    .btn {
+      background: var(--bg-card);
+      color: var(--text);
+      border: 1px solid var(--border);
+      padding: 7px 14px;
+      border-radius: var(--radius-sm);
+      cursor: pointer;
+      font-size: 13px;
+      font-weight: 500;
+      transition: var(--transition);
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      user-select: none;
+      text-decoration: none;
+    }
+
+    .btn:hover {
+      background: var(--bg-card-hover);
+      border-color: #3f4a69;
+      color: #fff;
+    }
+
+    .btn:active {
+      transform: translateY(1px);
+    }
+
+    .btn.active {
+      background: var(--primary);
+      border-color: var(--primary);
+      color: #fff;
+      box-shadow: 0 0 12px rgba(59, 130, 246, 0.4);
+    }
+
+    .btn-primary {
+      background: var(--primary);
+      border-color: var(--primary);
+      color: #fff;
+    }
+
+    .btn-primary:hover {
+      background: var(--primary-hover);
+      border-color: var(--primary-hover);
+    }
+
+    .btn-success {
+      background: rgba(16, 185, 129, 0.15);
+      border-color: rgba(16, 185, 129, 0.4);
+      color: var(--success);
+    }
+
+    .btn-success:hover {
+      background: rgba(16, 185, 129, 0.25);
+    }
+
+    .btn-danger {
+      background: rgba(239, 68, 68, 0.15);
+      border-color: rgba(239, 68, 68, 0.4);
+      color: var(--danger);
+    }
+
+    .btn-danger:hover {
+      background: rgba(239, 68, 68, 0.25);
+    }
+
+    .btn-danger.active, .btn-danger:active {
+      background: var(--danger);
+      color: #fff;
+    }
+
+    /* Main Workspace */
     .main {
       display: flex;
       flex: 1;
       overflow: hidden;
+      position: relative;
     }
 
+    /* Stream Area */
     .stream-container {
       flex: 1;
       background: #000;
@@ -49,56 +207,102 @@
       justify-content: center;
       overflow: auto;
       position: relative;
+      transition: flex 0.2s ease;
     }
 
+    .stream-container.hidden {
+      display: none !important;
+    }
+
+    #streamCanvas {
+      display: block;
+      max-width: 100%;
+      max-height: 100%;
+      cursor: crosshair;
+    }
+
+    /* Tap-to-focus ring indicator */
+    .focus-ring {
+      position: absolute;
+      width: 50px;
+      height: 50px;
+      border: 2px solid var(--accent);
+      border-radius: 50%;
+      transform: translate(-50%, -50%) scale(1.4);
+      opacity: 0;
+      pointer-events: none;
+      transition: transform 0.25s ease-out, opacity 0.25s ease-out;
+      box-shadow: 0 0 10px var(--accent);
+      z-index: 50;
+    }
+
+    .focus-ring.active {
+      opacity: 1;
+      transform: translate(-50%, -50%) scale(1);
+    }
+
+    /* Status Overlay in Video */
     .status-overlay {
       position: absolute;
-      top: 15px;
-      right: 15px;
+      top: 14px;
+      right: 14px;
       display: flex;
       align-items: center;
       gap: 12px;
-      background: rgba(30, 30, 30, 0.75);
-      backdrop-filter: blur(10px);
-      -webkit-backdrop-filter: blur(10px);
-      border: 1px solid rgba(255, 255, 255, 0.15);
-      padding: 6px 14px;
+      background: rgba(15, 18, 28, 0.8);
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      padding: 5px 12px;
       border-radius: 20px;
-      z-index: 100;
-      font-size: 13px;
+      z-index: 10;
+      font-size: 12px;
       font-weight: 600;
-      color: #e0e0e0;
-      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5);
+      color: #e2e8f0;
       pointer-events: none;
+      box-shadow: 0 4px 14px rgba(0, 0, 0, 0.4);
     }
 
-    .status-overlay span {
+    .status-item {
       display: flex;
       align-items: center;
-      gap: 5px;
+      gap: 4px;
     }
 
     .stream-loading {
       position: absolute;
       inset: 0;
       display: flex;
+      flex-direction: column;
       align-items: center;
       justify-content: center;
-      color: #aaa;
-      font-size: 16px;
-      font-weight: 600;
-      letter-spacing: 1px;
+      gap: 12px;
+      color: var(--text-muted);
+      font-size: 14px;
+      font-weight: 500;
       z-index: 5;
+      background: #000;
       pointer-events: none;
     }
 
+    /* Controls Panel */
     .controls-panel {
-      width: 350px;
-      background: #1e1e1e;
-      padding: 20px;
-      border-left: 1px solid #333;
+      width: 380px;
+      background: var(--bg-panel);
+      border-left: 1px solid var(--border);
       overflow-y: auto;
       position: relative;
+      flex-shrink: 0;
+      display: flex;
+      flex-direction: column;
+      transition: width 0.2s ease;
+    }
+
+    .controls-panel.full-view {
+      width: 100%;
+      border-left: none;
+      max-width: 900px;
+      margin: 0 auto;
     }
 
     .controls-panel-loading {
@@ -109,9 +313,9 @@
       align-items: center;
       justify-content: center;
       gap: 12px;
-      background: #1e1e1e;
-      z-index: 5;
-      color: #888;
+      background: var(--bg-panel);
+      z-index: 30;
+      color: var(--text-muted);
       font-size: 14px;
     }
 
@@ -124,1399 +328,923 @@
       pointer-events: none;
     }
 
+    .controls-content {
+      padding: 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+
+    /* Cards / Setting Groups */
+    .card {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    .card-title {
+      font-size: 12px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.8px;
+      color: var(--accent);
+      margin: 0;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .control-row {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    .control-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-size: 13px;
+      color: var(--text-muted);
+    }
+
+    .val-badge {
+      color: var(--accent);
+      font-weight: 600;
+      font-size: 12px;
+      background: rgba(6, 182, 212, 0.1);
+      padding: 2px 7px;
+      border-radius: 4px;
+    }
+
+    /* Form Controls */
+    select, input[type=number], input[type=text] {
+      background: #11141e;
+      color: var(--text);
+      border: 1px solid var(--border);
+      padding: 8px 10px;
+      border-radius: var(--radius-sm);
+      width: 100%;
+      font-size: 13px;
+      outline: none;
+      transition: var(--transition);
+    }
+
+    select:focus, input[type=number]:focus, input[type=text]:focus {
+      border-color: var(--border-focus);
+      box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.2);
+    }
+
+    input[type=range] {
+      width: 100%;
+      height: 6px;
+      background: #11141e;
+      border-radius: 3px;
+      outline: none;
+      cursor: pointer;
+      margin: 6px 0;
+      accent-color: var(--primary);
+    }
+
+    .grid-2 {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+    }
+
+    .grid-4 {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 6px;
+    }
+
+    /* Fast MJPEG URL Bar */
+    .stream-url-bar {
+      background: #11141e;
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      padding: 6px 8px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .stream-url-text {
+      flex: 1;
+      font-family: monospace;
+      font-size: 12px;
+      color: var(--accent);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      user-select: all;
+    }
+
+    .btn-copy {
+      padding: 5px 10px;
+      font-size: 12px;
+      background: var(--primary);
+      border-color: var(--primary);
+      color: #fff;
+      flex-shrink: 0;
+    }
+
+    .btn-copy:hover {
+      background: var(--primary-hover);
+    }
+
+    .toast {
+      position: fixed;
+      bottom: 20px;
+      left: 50%;
+      transform: translateX(-50%) translateY(50px);
+      background: var(--primary);
+      color: #fff;
+      padding: 8px 16px;
+      border-radius: 20px;
+      font-size: 13px;
+      font-weight: 600;
+      opacity: 0;
+      transition: transform 0.2s ease, opacity 0.2s ease;
+      z-index: 100;
+      box-shadow: 0 4px 16px rgba(0,0,0,0.5);
+    }
+
+    .toast.show {
+      transform: translateX(-50%) translateY(0);
+      opacity: 1;
+    }
+
+    .preview-hidden-banner {
+      display: none;
+      background: rgba(59, 130, 246, 0.1);
+      border: 1px solid rgba(59, 130, 246, 0.3);
+      border-radius: var(--radius);
+      padding: 14px;
+      text-align: center;
+      color: var(--text);
+      font-size: 13px;
+    }
+
+    .controls-panel.full-view .preview-hidden-banner {
+      display: block;
+    }
+
+    /* Spinners */
     .spinner {
-      width: 28px;
-      height: 28px;
-      border: 3px solid #333;
-      border-top-color: #007AFF;
+      width: 30px;
+      height: 30px;
+      border: 3px solid rgba(255, 255, 255, 0.1);
+      border-top-color: var(--primary);
       border-radius: 50%;
       animation: spin 0.8s linear infinite;
     }
 
     @keyframes spin {
-      to {
-        transform: rotate(360deg);
-      }
+      to { transform: rotate(360deg); }
     }
 
-    .btn {
-      background: #333;
-      color: #fff;
-      border: 1px solid #555;
-      padding: 8px 15px;
-      border-radius: 6px;
-      cursor: pointer;
-      font-size: 14px;
-      transition: 0.2s;
-    }
-
-    .btn:hover {
-      background: #444;
-    }
-
-    .btn.active {
-      background: #007AFF;
-      border-color: #007AFF;
-    }
-
-    .btn-action {
-      width: 100%;
-      margin-bottom: 15px;
-      background: #444;
-      border-color: #666;
-      font-weight: bold;
-    }
-
-    .btn-action.ptt-active {
-      background: #d32f2f;
-      border-color: #b71c1c;
-      color: #fff;
-    }
-
-    .camera-controls {
-      margin-bottom: 15px;
-    }
-
-    .camera-select {
-      margin-top: 0;
-      margin-bottom: 0;
-      min-height: 42px;
-      font-size: 15px;
-    }
-
-    .setting-group {
-      background: #252525;
-      padding: 15px;
-      border-radius: 10px;
-      margin-bottom: 15px;
-    }
-
-    h3 {
-      margin-top: 0;
-      font-size: 14px;
-      color: #888;
-      text-transform: uppercase;
-      letter-spacing: 1px;
-      margin-bottom: 15px;
-    }
-
-    .group-title {
-      font-size: 12px;
-      color: #aaa;
-      text-transform: uppercase;
-      letter-spacing: 1px;
-      font-weight: bold;
-      margin: 22px 0 14px;
-    }
-
-    label {
-      display: block;
-      margin-bottom: 5px;
-      font-size: 13px;
-      color: #ccc;
-    }
-
-    input[type=range] {
-      width: 100%;
-      margin-bottom: 20px;
-      cursor: pointer;
-    }
-
-    input[type=number],
-    select {
-      background: #333;
-      color: #fff;
-      border: 1px solid #555;
-      padding: 8px;
-      border-radius: 4px;
-      width: 100%;
-      margin-top: 5px;
-      box-sizing: border-box;
-    }
-
-    .val-badge {
-      float: right;
-      color: #007AFF;
-      font-weight: bold;
-    }
-
-    .notice,
-    .version {
-      color: #555;
-      font-size: 11px;
-      text-align: center;
-    }
-
-    .stream-container:fullscreen,
-    .stream-container:-webkit-full-screen {
-      width: 100vw;
-      height: 100vh;
-    }
-
+    /* Responsive Layout */
     @media (max-width: 900px) {
       .main {
         flex-direction: column;
       }
-
       .controls-panel {
-        width: auto;
-        height: 45%;
+        width: 100%;
+        height: 52%;
         border-left: none;
-        border-top: 1px solid #333;
+        border-top: 1px solid var(--border);
+      }
+      .stream-container {
+        height: 48%;
       }
     }
   </style>
 </head>
 
 <body>
-  <div class='header'>
-    <h2 style='margin:0;font-size:18px;'>Android IP Camera</h2>
-    <div style="display:flex;gap:8px;">
-      <button id='fitBtn' class='btn active' onclick='setView("fit")'>Fit Screen</button>
-      <button id='origBtn' class='btn' onclick='setView("original")'>Original Size</button>
-      <button id='fullscreenBtn' class='btn' onclick='toggleFullscreen()'>⛶ Fullscreen</button>
+  <!-- Header Navbar -->
+  <header class="header">
+    <div class="brand">
+      <div class="brand-icon">📹</div>
+      <h1>Android IP Camera</h1>
+      <span class="live-badge"><span class="live-dot"></span>MJPEG Live</span>
     </div>
-  </div>
+    <div class="header-actions">
+      <button id="togglePreviewBtn" class="btn" title="Toggle camera video preview to save CPU / network">👁️ Hide Preview</button>
+      <button id="fitBtn" class="btn active" onclick="setView('fit')" title="Fit to screen">Fit</button>
+      <button id="origBtn" class="btn" onclick="setView('original')" title="Actual pixel dimensions">1:1</button>
+      <button id="fullscreenBtn" class="btn" onclick="toggleFullscreen()" title="Fullscreen stream">⛶</button>
+    </div>
+  </header>
 
-  <div class='main'>
-    <div class='stream-container' id='streamContainer'>
+  <!-- Main View -->
+  <main class="main">
+    <!-- Stream Canvas Area -->
+    <div class="stream-container" id="streamContainer">
       <div id="statusOverlay" class="status-overlay" style="display: none;">
-        <span id="wifiStatus" title="WiFi Strength">🛜 --%</span>
-        <span id="batteryStatus" title="Battery Status">🔋 --%</span>
+        <div class="status-item" id="wifiStatus" title="WiFi Signal">🛜 --%</div>
+        <div class="status-item" id="batteryStatus" title="Battery Level">🔋 --%</div>
+        <div class="status-item" id="fpsStatus" title="Stream Frame Rate">⚡ 0 fps</div>
       </div>
-      <div id="streamLoading" class="stream-loading">Loading...</div>
-      <canvas id='streamCanvas'></canvas>
+      <div id="streamLoading" class="stream-loading">
+        <div class="spinner"></div>
+        <span>Connecting to low-latency stream…</span>
+      </div>
+      <canvas id="streamCanvas" title="Click anywhere to Tap-to-Focus"></canvas>
+      <div id="focusRing" class="focus-ring"></div>
       <audio id="audioEl" preload="none" muted></audio>
     </div>
 
-    <div class='controls-panel loading' id='controlsPanel'>
-      <div class='controls-panel-loading' aria-live='polite'>
-        <div class='spinner'></div>
-        <span>Loading settings…</span>
+    <!-- Controls Sidebar -->
+    <aside class="controls-panel loading" id="controlsPanel">
+      <div class="controls-panel-loading" aria-live="polite">
+        <div class="spinner"></div>
+        <span>Loading camera configuration…</span>
       </div>
 
-      <div class='controls-content'>
-        <div class='setting-group'>
-          <h3>Settings</h3>
-          <div style="display:flex; gap:8px; align-items:flex-end; margin-bottom:15px;">
-            <div style="width:calc(50% - 4px); min-width:0;">
-              <label for="cameraSelect">Camera <span class="val-badge" id="cameraFacingBadge">&mdash;</span></label>
-              <div class="camera-controls" style="margin-bottom:0;">
-                <select id="cameraSelect" class="camera-select" onchange='setCamera(this.value)'></select>
-              </div>
-            </div>
-            <button id="flashBtn" class="btn btn-action" style="width:calc(50% - 4px); margin-bottom:0;">💡 Flash On</button>
-          </div>
-
-          <div>
-            <button id="muteBtn" class="btn btn-action" style="width: 49%;">🔇 Unmute Audio</button>
-            <button id="pttBtn" class="btn btn-action" style="width: 49%; margin-bottom: 0;">🎙️ Hold to Talk</button>
-          </div>
-
-          <div id="audioControls">
-            <label for="avDelay">AV Sync Delay <span class='val-badge' id='avDelayVal'>2.5s</span></label>
-            <input type='range' id='avDelay' min='0' max='5' step='0.1' value='2.5'>
-
-            <label for="audioGain">Audio Gain <span class='val-badge' id='audioGainVal'>1.0</span></label>
-            <input id="audioGain" type='range' min='0.5' max='3.0' step='0.1' value='1.0' data-control='audio_gain'
-              data-badge='audioGainVal'>
-          </div>
-
-          <div>
-            <button id="modeH264Btn" class="btn btn-action" style="width: 49%;">H.264</button>
-            <button id="modeMjpegBtn" class="btn btn-action" style="width: 49%;">MJPEG</button>
-          </div>
-
-          <p class="group-title">Camera Control</p>
-
-          <label for="resolutionSelect">Resolution <span class='val-badge' id='resolutionVal'>&mdash;</span></label>
-          <select id="resolutionSelect" style="margin-bottom: 20px" onchange='setResolution(this.value)'></select>
-
-          <label for="zoom">Zoom <span class='val-badge' id='zoomVal'>1.0x</span></label>
-          <input id="zoom" type='range' min='0.1' max='8.0' step='0.1' value='1.0' data-control='zoom'
-            data-badge='zoomVal' data-fmt='suffix' data-suffix='x'>
-
-          <label for="exposure">Exposure <span class='val-badge' id='exposureVal'>0</span></label>
-          <input id="exposure" type='range' min='-10' max='10' step='1' value='0' data-control='exposure'
-            data-badge='exposureVal'>
-
-          <label for="focusDistance">Focus <span class='val-badge' id='focusVal'>Auto</span></label>
-          <input id="focusDistance" type='range' min='-0.05' max='1.0' step='0.05' value='-1'
-            data-control='focus_distance' data-badge='focusVal' data-fmt='focus'>
-
-          <div style="margin-bottom: 12px">
-            <label for="rotate">Rotation <span class='val-badge' id='rotateVal'>0°</span></label>
-            <input id="rotate" type="range" min="0" max="359" step="1" value="0" data-control="rotate"
-              data-badge="rotateVal" data-fmt="suffix" data-suffix="°" style="margin-bottom: 8px;">
-            <div style="display:flex;gap:8px;margin-bottom:8px;width:100%;">
-              <button class="btn" style="flex:1;min-width:0;" data-control="rotate" data-value="0" data-badge="rotateVal">0°</button>
-              <button class="btn" style="flex:1;min-width:0;" data-control="rotate" data-value="90" data-badge="rotateVal">90°</button>
-              <button class="btn" style="flex:1;min-width:0;" data-control="rotate" data-value="180" data-badge="rotateVal">180°</button>
-              <button class="btn" style="flex:1;min-width:0;" data-control="rotate" data-value="270" data-badge="rotateVal">270°</button>
-            </div>
-          </div>
-
-          <label>
-            <input type="checkbox" id="mirrorCheckbox" onchange="sendControl('mirror', this.checked ? 'true' : 'false')" style="margin:0;vertical-align:middle;">
-            <span style="vertical-align:middle;">Mirror</span>
-          </label>
-
-          <p class="group-title">Post Processing</p>
-
-          <label for="scale">Scale <span class='val-badge' id='scaleVal'>1.0x</span></label>
-          <input id="scale" type='range' min='0.5' max='2.0' step='0.1' value='1.0' data-control='scale'
-            data-badge='scaleVal' data-fmt='suffix' data-suffix='x' data-setview='original'>
-
-          <label for="contrast">Contrast <span class='val-badge' id='contVal'>0</span></label>
-          <input id="contrast" type='range' min='-50' max='50' step='10' value='0' data-control='contrast'
-            data-badge='contVal'>
-
-          <label for="fps">Frame Rate (fps)</label>
-          <input id="fps" type='number' min='1' max='60' value='30' data-control='fps'>
-
-          <div style="margin-top:12px;">
-            <button id="resetDefaultsBtn" class="btn" style="width:100%;">Reset to defaults</button>
-          </div>
-
-          <div id="motionSettings" style="display:none;">
-            <p class="group-title">Motion Detection</p>
-
-            <label>
-              <input type="checkbox" id="motionCheckbox" onchange="sendControl('motion_detection_enabled', this.checked ? 'true' : 'false')" style="margin:0;vertical-align:middle;">
-              <span style="vertical-align:middle;">Enable Motion Detection</span>
-            </label>
-            <div class="hint" style="margin:-2px 0 12px; font-size:12px; color:#ccc">
-              Keeps the camera running and reports motion to <a href="https://github.com/DigitallyRefined/android-ip-camera#-onvif-camera" target="_blank">ONVIF clients</a> (Home Assistant, UniFi Protect).
-            </div>
-
-            <label for="motionSensitivity">Sensitivity <span class='val-badge' id='motionSensitivityVal'>5</span></label>
-            <input id="motionSensitivity" type='range' min='1' max='10' step='1' value='5' data-control='motion_sensitivity' data-badge='motionSensitivityVal' style='margin-bottom: 0'>
-          </div>
-
-          <p class="group-title">Snapshot</p>
-
-          <label for="snapshotRes">Snapshot Resolution</label>
-          <select id="snapshotRes" style="margin-bottom: 12px" data-control="snapshot_res">
-            <option value="stream">Match stream (fast)</option>
-            <option value="max">Max (full sensor)</option>
-          </select>
-          <div style="display:flex; gap:8px; margin-bottom:8px;">
-            <button id="recordToggleBtn" class="btn btn-action" style="flex:1 1 0; min-width:0; margin-bottom:0;" onclick="toggleRecording()">🔴 Record</button>
-            <button id="snapBtn" class="btn btn-action" style="flex:1 1 0; min-width:0; margin-bottom:0;" onclick="takeSnapshot()">📸 Take Snapshot</button>
-          </div>
-          <div style="display:flex; justify-content:flex-end; align-items:center; gap:4px; margin-bottom:8px;">
-            <label style="margin:0; font-size:13px; color:#ccc; cursor:pointer;" title="Timer (seconds, 0 = instant)">⏱️</label>
-            <input type="number" id="timerInput" min="0" max="300" step="1" value="0"
-              style="width:50px; padding:4px 6px; font-size:13px; text-align:center; background:#333; color:#fff; border:1px solid #555; border-radius:4px; margin:0;">
+      <div class="controls-content">
+        <!-- Banner shown when preview is hidden -->
+        <div class="preview-hidden-banner">
+          <strong>👁️ Video preview is hidden.</strong> Stream decoding is paused to minimize bandwidth and CPU usage. Settings are live.
+          <div style="margin-top: 8px;">
+            <button class="btn btn-primary" onclick="togglePreview()">Show Preview</button>
           </div>
         </div>
 
-        <p class="notice">Some changes will momentarily restart the camera.</p>
-        <p class="version"><a href="https://github.com/DigitallyRefined/android-ip-camera" target="_blank">Android IP Camera <span id="appVersion"></span></a></p>
+        <!-- Direct Stream URL Card -->
+        <section class="card">
+          <div class="card-title">
+            <span>MJPEG Stream Link</span>
+            <span class="val-badge" id="resLiveBadge">Direct URL</span>
+          </div>
+          <div class="stream-url-bar">
+            <span class="stream-url-text" id="streamUrlText">Loading stream URL…</span>
+            <button class="btn btn-copy" id="copyStreamBtn" onclick="copyStreamUrl()">📋 Copy</button>
+          </div>
+          <div class="grid-2">
+            <a id="openStreamLink" href="/video/mjpeg" target="_blank" class="btn" style="text-align:center;">↗ Open Stream</a>
+            <button class="btn" onclick="takeSnapshot()">📸 Snapshot</button>
+          </div>
+        </section>
+
+        <!-- Stream Quality & Bitrate Card -->
+        <section class="card">
+          <div class="card-title">
+            <span>Video &amp; Bitrate</span>
+            <span class="val-badge" id="latencyBadge">Low Latency</span>
+          </div>
+
+          <div class="control-row">
+            <div class="control-header">
+              <label for="bitrateSelect">Bitrate Target / Limit</label>
+            </div>
+            <select id="bitrateSelect" onchange="sendControl('bitrate', this.value)">
+              <option value="0">Unlimited (Maximum Quality)</option>
+              <option value="20000">20 Mbps (Extreme)</option>
+              <option value="12000">12 Mbps (Very High)</option>
+              <option value="8000">8 Mbps (High Quality)</option>
+              <option value="4000">4 Mbps (Balanced)</option>
+              <option value="2000">2 Mbps (Low Latency)</option>
+              <option value="1000">1 Mbps (Constrained Network)</option>
+            </select>
+          </div>
+
+          <div class="control-row">
+            <div class="control-header">
+              <label for="qualityRange">JPEG Quality</label>
+              <span class="val-badge" id="qualityVal">85%</span>
+            </div>
+            <input id="qualityRange" type="range" min="20" max="98" step="1" value="85"
+                   data-control="quality" data-badge="qualityVal" data-fmt="suffix" data-suffix="%">
+          </div>
+
+          <div class="grid-2">
+            <div class="control-row">
+              <div class="control-header">
+                <label for="resolutionSelect">Resolution</label>
+              </div>
+              <select id="resolutionSelect" onchange="setResolution(this.value)"></select>
+            </div>
+            <div class="control-row">
+              <div class="control-header">
+                <label for="fps">Target FPS</label>
+              </div>
+              <input id="fps" type="number" min="1" max="60" value="30" data-control="fps">
+            </div>
+          </div>
+        </section>
+
+        <!-- Focus & Optics Card -->
+        <section class="card">
+          <div class="card-title">
+            <span>Focus &amp; Optics</span>
+            <button id="focusTriggerBtn" class="btn btn-primary" style="padding: 3px 8px; font-size: 11px;">🎯 Focus Now</button>
+          </div>
+
+          <div class="control-row">
+            <div class="control-header">
+              <label for="focusModeSelect">Focus Mode</label>
+            </div>
+            <select id="focusModeSelect" onchange="onFocusModeChange(this.value)">
+              <option value="continuous">Continuous Auto Focus (Default)</option>
+              <option value="auto">Auto (Tap or Trigger)</option>
+              <option value="infinity">Fixed / Infinity (Far)</option>
+              <option value="macro">Macro (Close-up)</option>
+              <option value="manual">Manual Distance</option>
+            </select>
+          </div>
+
+          <div class="control-row" id="focusDistanceRow" style="display: none;">
+            <div class="control-header">
+              <label for="focusDistance">Manual Distance</label>
+              <span class="val-badge" id="focusVal">Auto</span>
+            </div>
+            <input id="focusDistance" type="range" min="-0.05" max="1.0" step="0.02" value="-1"
+                   data-control="focus_distance" data-badge="focusVal" data-fmt="focus">
+          </div>
+
+          <div class="grid-2">
+            <div class="control-row">
+              <div class="control-header">
+                <label for="cameraSelect">Lens</label>
+              </div>
+              <select id="cameraSelect" onchange="setCamera(this.value)"></select>
+            </div>
+            <div class="control-row">
+              <div class="control-header">
+                <label>Torch</label>
+              </div>
+              <button id="flashBtn" class="btn" style="height: 38px;">💡 Flash Off</button>
+            </div>
+          </div>
+
+          <div class="control-row">
+            <div class="control-header">
+              <label for="zoom">Zoom</label>
+              <span class="val-badge" id="zoomVal">1.0x</span>
+            </div>
+            <input id="zoom" type="range" min="0.1" max="8.0" step="0.1" value="1.0"
+                   data-control="zoom" data-badge="zoomVal" data-fmt="suffix" data-suffix="x">
+          </div>
+
+          <div class="control-row">
+            <div class="control-header">
+              <label for="exposure">Exposure Compensation</label>
+              <span class="val-badge" id="exposureVal">0</span>
+            </div>
+            <input id="exposure" type="range" min="-10" max="10" step="1" value="0"
+                   data-control="exposure" data-badge="exposureVal">
+          </div>
+        </section>
+
+        <!-- Audio & Push to Talk Card -->
+        <section class="card">
+          <div class="card-title">
+            <span>Audio &amp; Voice</span>
+            <span class="val-badge" id="audioStateBadge">Ready</span>
+          </div>
+
+          <div class="grid-2">
+            <button id="muteBtn" class="btn">🔇 Listen Audio</button>
+            <button id="pttBtn" class="btn btn-danger">🎙️ Hold to Talk</button>
+          </div>
+
+          <div class="control-row">
+            <div class="control-header">
+              <label for="audioGain">Microphone Gain</label>
+              <span class="val-badge" id="audioGainVal">1.0x</span>
+            </div>
+            <input id="audioGain" type="range" min="0.5" max="3.0" step="0.1" value="1.0"
+                   data-control="audio_gain" data-badge="audioGainVal">
+          </div>
+        </section>
+
+        <!-- Image & Transform Card -->
+        <section class="card">
+          <div class="card-title">
+            <span>Image Adjustments</span>
+          </div>
+
+          <div class="control-row">
+            <div class="control-header">
+              <label>Rotation</label>
+              <span class="val-badge" id="rotateVal">0°</span>
+            </div>
+            <div class="grid-4">
+              <button class="btn" onclick="setRotation(0)">0°</button>
+              <button class="btn" onclick="setRotation(90)">90°</button>
+              <button class="btn" onclick="setRotation(180)">180°</button>
+              <button class="btn" onclick="setRotation(270)">270°</button>
+            </div>
+          </div>
+
+          <div class="grid-2" style="align-items: center; margin-top: 4px;">
+            <label style="display:flex; align-items:center; gap:8px; cursor:pointer;">
+              <input type="checkbox" id="mirrorCheckbox" onchange="sendControl('mirror', this.checked ? 'true' : 'false')">
+              <span>Mirror Horizontal</span>
+            </label>
+            <label style="display:flex; align-items:center; gap:8px; cursor:pointer;">
+              <input type="checkbox" id="motionCheckbox" onchange="sendControl('motion_detection_enabled', this.checked ? 'true' : 'false')">
+              <span>Motion Detection</span>
+            </label>
+          </div>
+
+          <div class="control-row">
+            <div class="control-header">
+              <label for="contrast">Digital Contrast</label>
+              <span class="val-badge" id="contVal">0</span>
+            </div>
+            <input id="contrast" type="range" min="-50" max="50" step="5" value="0"
+                   data-control="contrast" data-badge="contVal">
+          </div>
+
+          <div class="control-row">
+            <div class="control-header">
+              <label for="scale">Digital Scale</label>
+              <span class="val-badge" id="scaleVal">1.0x</span>
+            </div>
+            <input id="scale" type="range" min="0.5" max="2.0" step="0.05" value="1.0"
+                   data-control="scale" data-badge="scaleVal" data-fmt="suffix" data-suffix="x">
+          </div>
+
+          <button id="resetDefaultsBtn" class="btn" style="margin-top: 6px;">Reset Camera Defaults</button>
+        </section>
+
+        <footer style="text-align: center; color: var(--text-dim); font-size: 11px; padding: 6px 0 16px;">
+          Android IP Camera &bull; <span id="appVersion">v0.17.0</span>
+        </footer>
       </div>
-    </div>
-  </div>
+    </aside>
+  </main>
+
+  <div id="toast" class="toast">Copied to clipboard!</div>
 
   <script>
-    const getElById = (id) => document.getElementById(id);
+    const getEl = id => document.getElementById(id);
+    const streamContainer = getEl('streamContainer');
+    const streamCanvas = getEl('streamCanvas');
+    const controlsPanel = getEl('controlsPanel');
+    const streamLoading = getEl('streamLoading');
+    const focusRing = getEl('focusRing');
+    const togglePreviewBtn = getEl('togglePreviewBtn');
+    const flashBtn = getEl('flashBtn');
+    const muteBtn = getEl('muteBtn');
+    const pttBtn = getEl('pttBtn');
+    const audioEl = getEl('audioEl');
+    const toast = getEl('toast');
+    const streamUrlText = getEl('streamUrlText');
 
-    let currentCamera = '';
-    const audioEl = getElById('audioEl');
-    const muteBtn = getElById('muteBtn');
-    const audioControls = getElById('audioControls');
-    const streamContainer = getElById('streamContainer');
-    const avDelay = getElById('avDelay');
-    const avDelayVal = getElById('avDelayVal');
-    const STREAM_SRC = '/video/mjpeg';
-    let videoDelayMs = 2500;
+    let cameraList = [];
+    let currentCamera = null;
+    let viewMode = 'fit';
+    let isPreviewHidden = localStorage.getItem('hidePreview') === 'true';
     let mjpegAbort = null;
     let mjpegRunning = false;
-    let frameQueue = [];
-    let lastDrawn = null;
-    let drawing = false;
-    let viewMode = 'fit';
     let torchState = 'off';
-    let deviceHasFlash = false;
-    let cameraList = [];
+    let lastDrawnBmp = null;
+    let userScale = 1.0;
+    let rotate = 0;
+    let desiredResolution = 'auto';
 
-    function isFullscreenActive() {
-      return !!(document.fullscreenElement || document.webkitFullscreenElement);
+    // FPS calculation
+    let frameCount = 0;
+    let lastFpsTime = performance.now();
+
+    function showToast(msg) {
+      toast.textContent = msg;
+      toast.classList.add('show');
+      setTimeout(() => toast.classList.remove('show'), 2000);
     }
 
-    function targetCanvasSize(frame) {
-      if (viewMode === 'fit' || isFullscreenActive()) {
-        let w, h;
-        if (isFullscreenActive()) {
-          w = window.innerWidth;
-          h = window.innerHeight;
-        } else if (streamContainer?.clientWidth) {
-          w = streamContainer.clientWidth;
-          h = streamContainer.clientHeight;
-        } else {
-          w = frame ? frame.width : (lastDrawn ? lastDrawn.width : streamCanvas.width);
-          h = frame ? frame.height : (lastDrawn ? lastDrawn.height : streamCanvas.height);
-        }
-        return { w, h };
+    function getStreamUrl() {
+      const loc = window.location;
+      return `${loc.protocol}//${loc.host}/video/mjpeg`;
+    }
+
+    function updateStreamUrlDisplay() {
+      const url = getStreamUrl();
+      if (streamUrlText) streamUrlText.textContent = url;
+      const openLink = getEl('openStreamLink');
+      if (openLink) openLink.href = url;
+    }
+
+    function copyStreamUrl() {
+      const url = getStreamUrl();
+      navigator.clipboard.writeText(url).then(() => {
+        showToast('Stream link copied to clipboard!');
+      }).catch(() => {
+        const input = document.createElement('input');
+        input.value = url;
+        document.body.appendChild(input);
+        input.select();
+        document.execCommand('copy');
+        document.body.removeChild(input);
+        showToast('Stream link copied!');
+      });
+    }
+
+    // Toggle Preview
+    function togglePreview() {
+      isPreviewHidden = !isPreviewHidden;
+      localStorage.setItem('hidePreview', isPreviewHidden);
+      applyPreviewState();
+    }
+
+    function applyPreviewState() {
+      if (isPreviewHidden) {
+        streamContainer.classList.add('hidden');
+        controlsPanel.classList.add('full-view');
+        togglePreviewBtn.textContent = '👁️ Show Preview';
+        togglePreviewBtn.classList.add('active');
+        stopMjpegStream();
       } else {
-        const w = frame ? frame.width : (lastDrawn ? lastDrawn.width : streamCanvas.width);
-        const h = frame ? frame.height : (lastDrawn ? lastDrawn.height : streamCanvas.height);
-        return { w, h };
+        streamContainer.classList.remove('hidden');
+        controlsPanel.classList.remove('full-view');
+        togglePreviewBtn.textContent = '👁️ Hide Preview';
+        togglePreviewBtn.classList.remove('active');
+        startMjpegStream();
+        requestAnimationFrame(() => applyCanvasSize(targetCanvasSize(lastDrawnBmp)));
+      }
+    }
+
+    togglePreviewBtn.addEventListener('click', togglePreview);
+
+    // Ultra-Low Latency MJPEG streaming engine
+    function stopMjpegStream() {
+      if (mjpegAbort) {
+        try { mjpegAbort.abort(); } catch (_) {}
+        mjpegAbort = null;
+      }
+      mjpegRunning = false;
+      if (lastDrawnBmp) {
+        try { lastDrawnBmp.close(); } catch (_) {}
+        lastDrawnBmp = null;
+      }
+    }
+
+    function startMjpegStream() {
+      if (isPreviewHidden || !streamCanvas) return;
+      stopMjpegStream();
+
+      const controller = new AbortController();
+      mjpegAbort = controller;
+      mjpegRunning = true;
+      streamLoading.style.display = 'flex';
+
+      const ctx = streamCanvas.getContext('2d', { alpha: false, desynchronized: true });
+
+      fetch('/video/mjpeg', {
+        cache: 'no-store',
+        credentials: 'include',
+        signal: controller.signal
+      }).then(res => {
+        if (!res.body) throw new Error('No readable stream');
+        const reader = res.body.getReader();
+        let buffer = new Uint8Array(0);
+
+        function concat(a, b) {
+          const c = new Uint8Array(a.length + b.length);
+          c.set(a, 0);
+          c.set(b, a.length);
+          return c;
+        }
+
+        function findMarker(buf, marker) {
+          for (let i = 0; i < buf.length - 1; i++) {
+            if (buf[i] === 0xFF && buf[i + 1] === marker) return i;
+          }
+          return -1;
+        }
+
+        function renderFrame(bmp) {
+          streamLoading.style.display = 'none';
+          const size = targetCanvasSize(bmp);
+          applyCanvasSize(size);
+
+          const w = size.w, h = size.h;
+          const iw = bmp.width, ih = bmp.height;
+          const scale = Math.min(w / iw, h / ih) * userScale;
+          const dw = Math.max(1, Math.floor(iw * scale));
+          const dh = Math.max(1, Math.floor(ih * scale));
+          const dx = Math.floor((w - dw) / 2);
+          const dy = Math.floor((h - dh) / 2);
+
+          ctx.fillStyle = '#000';
+          ctx.fillRect(0, 0, w, h);
+          ctx.drawImage(bmp, dx, dy, dw, dh);
+
+          if (lastDrawnBmp && lastDrawnBmp !== bmp) {
+            try { lastDrawnBmp.close(); } catch (_) {}
+          }
+          lastDrawnBmp = bmp;
+
+          frameCount++;
+          const now = performance.now();
+          if (now - lastFpsTime >= 1000) {
+            const fps = Math.round((frameCount * 1000) / (now - lastFpsTime));
+            const fpsEl = getEl('fpsStatus');
+            if (fpsEl) fpsEl.textContent = `⚡ ${fps} fps`;
+            frameCount = 0;
+            lastFpsTime = now;
+          }
+          setStreamResolution(iw, ih);
+        }
+
+        function process() {
+          while (true) {
+            const soi = findMarker(buffer, 0xD8);
+            if (soi < 0) break;
+            const rest = buffer.subarray(soi);
+            const eoiRel = findMarker(rest, 0xD9);
+            if (eoiRel < 0) break;
+            const eoi = soi + eoiRel + 2;
+            const frameBytes = buffer.subarray(soi, eoi);
+            buffer = buffer.subarray(eoi);
+
+            const blob = new Blob([frameBytes], { type: 'image/jpeg' });
+            createImageBitmap(blob).then(bmp => {
+              if (mjpegRunning) renderFrame(bmp);
+              else bmp.close();
+            }).catch(() => {});
+          }
+        }
+
+        function pump() {
+          return reader.read().then(({ done, value }) => {
+            if (done || !mjpegRunning) return;
+            if (value && value.length) {
+              buffer = concat(buffer, value);
+              process();
+            }
+            return pump();
+          });
+        }
+
+        return pump();
+      }).catch(err => {
+        if (err.name !== 'AbortError') {
+          console.error('MJPEG stream error:', err);
+          setTimeout(() => { if (mjpegRunning) startMjpegStream(); }, 2000);
+        }
+      });
+    }
+
+    function targetCanvasSize(bmp) {
+      const containerW = streamContainer.clientWidth || window.innerWidth;
+      const containerH = streamContainer.clientHeight || window.innerHeight;
+      if (!bmp) return { w: containerW, h: containerH };
+
+      if (viewMode === 'fit') {
+        const aspect = bmp.width / bmp.height;
+        let w = containerW;
+        let h = Math.round(w / aspect);
+        if (h > containerH) {
+          h = containerH;
+          w = Math.round(h * aspect);
+        }
+        return { w: Math.max(1, w), h: Math.max(1, h) };
+      } else {
+        return { w: bmp.width, h: bmp.height };
       }
     }
 
     function applyCanvasSize(size) {
-      if (!size) return;
-      if (streamCanvas.width !== size.w || streamCanvas.height !== size.h) {
-        streamCanvas.width = size.w;
-        streamCanvas.height = size.h;
+      if (!streamCanvas || !size) return;
+      if (streamCanvas.width !== size.w) streamCanvas.width = size.w;
+      if (streamCanvas.height !== size.h) streamCanvas.height = size.h;
+    }
+
+    function setView(mode) {
+      viewMode = mode;
+      getEl('fitBtn').className = 'btn' + (mode === 'fit' ? ' active' : '');
+      getEl('origBtn').className = 'btn' + (mode === 'original' ? ' active' : '');
+      applyCanvasSize(targetCanvasSize(lastDrawnBmp));
+    }
+
+    function toggleFullscreen() {
+      if (!document.fullscreenElement) {
+        streamContainer.requestFullscreen?.() || streamContainer.webkitRequestFullscreen?.();
+      } else {
+        document.exitFullscreen?.() || document.webkitExitFullscreen?.();
       }
     }
 
-    function updateMuteButton() {
-      muteBtn.textContent = audioEl.muted
-        ? '🔇 Unmute Audio'
-        : '🔊 Mute Audio';
+    // Tap to focus on canvas
+    streamCanvas.addEventListener('click', e => {
+      const rect = streamCanvas.getBoundingClientRect();
+      const clickX = e.clientX - rect.left;
+      const clickY = e.clientY - rect.top;
+      const normX = Math.max(0, Math.min(1, clickX / rect.width));
+      const normY = Math.max(0, Math.min(1, clickY / rect.height));
 
-      audioControls.style.display = audioEl.muted
-        ? 'none'
-        : 'block';
+      // Visual pulse ring
+      focusRing.style.left = `${e.clientX - streamContainer.getBoundingClientRect().left}px`;
+      focusRing.style.top = `${e.clientY - streamContainer.getBoundingClientRect().top}px`;
+      focusRing.classList.add('active');
+      setTimeout(() => focusRing.classList.remove('active'), 800);
+
+      sendControl('focus_point', `${normX.toFixed(3)},${normY.toFixed(3)}`);
+      showToast(`🎯 Focusing at ${Math.round(normX * 100)}%, ${Math.round(normY * 100)}%`);
+    });
+
+    getEl('focusTriggerBtn').addEventListener('click', () => {
+      sendControl('focus_trigger', '1');
+      showToast('🎯 Triggered Auto Focus');
+    });
+
+    function onFocusModeChange(mode) {
+      sendControl('focus_mode', mode);
+      const row = getEl('focusDistanceRow');
+      if (row) row.style.display = (mode === 'manual') ? 'flex' : 'none';
+      if (mode !== 'manual') {
+        const badge = getEl('focusVal');
+        if (badge) badge.textContent = mode.toUpperCase();
+      }
     }
 
-    const flashBtn = getElById('flashBtn');
+    // Remote Control Network Dispatcher
+    let lastControlTs = 0;
+    function nextControlTs() {
+      lastControlTs = Math.max(Date.now(), lastControlTs + 1);
+      return lastControlTs;
+    }
+
+    function sendControl(param, val) {
+      try {
+        return fetch(`/?${encodeURIComponent(param)}=${encodeURIComponent(val)}&ts=${nextControlTs()}`).catch(() => {});
+      } catch (_) {}
+    }
+
+    // Torch handling
     function setTorchState(state) {
       torchState = state;
-      updateFlashButton();
+      flashBtn.textContent = (state === 'on') ? '⚡ Flash Off' : '💡 Flash On';
+      flashBtn.className = 'btn' + (state === 'on' ? ' btn-primary' : '');
     }
 
-    function updateFlashButton() {
-      if (!flashBtn) return;
-      const currentCameraInfo = selectedCameraInfo();
-      const hasFlash = currentCameraInfo?.hasFlash || false;
-      // The torch is a device-level flash unit shared by the rear lenses: offer it even when the
-      // selected camera reports none (e.g. ultra-wide/depth), and keep it visible while on.
-      const visible = hasFlash || deviceHasFlash || torchState === 'on';
-      flashBtn.style.display = visible ? 'inline-block' : 'none';
-      if (visible) {
-        flashBtn.textContent = (torchState === 'on')
-          ? '⚡ Flash Off'
-          : '💡 Flash On';
-      }
-    }
+    flashBtn.addEventListener('click', () => {
+      const next = (torchState === 'on') ? 'off' : 'on';
+      sendControl('torch', next);
+      setTorchState(next);
+    });
 
-    if (flashBtn) {
-      flashBtn.addEventListener('click', () => {
-        const next = (torchState === 'on') ? 'off' : 'on';
-        try {
-          sendControl('torch', next);
-        } catch (_) { }
-        setTorchState(next);
-      });
-      updateFlashButton();
-    }
-
+    // Audio Playback
     muteBtn.addEventListener('click', () => {
-      const willUnmute = audioEl.muted;
-      if (willUnmute) {
-        // Preflight check to detect 403 without toggling UI state
-        const controller = new AbortController();
-        fetch('/audio', {
-          method: 'GET',
-          cache: 'no-store',
-          credentials: 'include',
-          signal: controller.signal
-        }).then(res => {
-          if (res?.status === 403) {
-            alert('Audio is disabled because microphone permission is not granted.');
-            return;
-          }
-          try { controller.abort(); } catch (_) { }
-          if (!audioEl.src) {
-            audioEl.src = '/audio';
-            audioEl.load();
-          }
-          audioEl.muted = false;
-          audioEl.play().catch(() => { });
-          updateMuteButton();
-        }).catch(() => {
-          // Network or other error: keep muted and do not toggle button
+      if (audioEl.muted) {
+        audioEl.src = '/audio';
+        audioEl.muted = false;
+        audioEl.play().then(() => {
+          muteBtn.textContent = '🔊 Mute Audio';
+          muteBtn.classList.add('active');
+          getEl('audioStateBadge').textContent = 'Live Audio';
+        }).catch(e => {
+          showToast('Audio playback failed or mic permission needed');
         });
       } else {
         audioEl.muted = true;
         audioEl.pause();
         audioEl.removeAttribute('src');
-        audioEl.load();
-        updateMuteButton();
+        muteBtn.textContent = '🔇 Listen Audio';
+        muteBtn.classList.remove('active');
+        getEl('audioStateBadge').textContent = 'Muted';
       }
     });
-    updateMuteButton();
 
-    if (avDelay && avDelayVal) {
-      avDelay.addEventListener('input', () => {
-        avDelayVal.textContent = `${avDelay.value}s`;
-        videoDelayMs = Math.max(0, (parseFloat(avDelay.value) || 0) * 1000);
+    // Push-to-Talk (Mic upload)
+    let pttContext = null;
+    let pttStream = null;
+    let pttProcessor = null;
+
+    function startPtt() {
+      navigator.mediaDevices.getUserMedia({ audio: true, video: false }).then(stream => {
+        pttStream = stream;
+        pttContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
+        const source = pttContext.createMediaStreamSource(stream);
+        pttProcessor = pttContext.createScriptProcessor(2048, 1, 1);
+
+        pttProcessor.onaudioprocess = e => {
+          const input = e.inputBuffer.getChannelData(0);
+          const pcm16 = new Int16Array(input.length);
+          for (let i = 0; i < input.length; i++) {
+            const s = Math.max(-1, Math.min(1, input[i]));
+            pcm16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+          }
+          fetch('/audio/upload', {
+            method: 'POST',
+            body: pcm16.buffer,
+            headers: { 'Content-Type': 'application/octet-stream' }
+          }).catch(() => {});
+        };
+
+        source.connect(pttProcessor);
+        pttProcessor.connect(pttContext.destination);
+        pttBtn.classList.add('active');
+        pttBtn.textContent = '🎙️ Transmitting…';
+        getEl('audioStateBadge').textContent = 'Push-to-Talk Active';
+      }).catch(err => {
+        showToast('Microphone access denied: ' + err.message);
       });
-      avDelayVal.textContent = `${avDelay.value}s`;
-      videoDelayMs = Math.max(0, (parseFloat(avDelay.value) || 0) * 1000);
     }
 
-    // Live preview while dragging, but throttled; each request carries an
-    // increasing timestamp so the server can drop out-of-order updates.
-    // Uses a trailing-throttle strategy: drop intermediate changes during
-    // the throttle window and always send the last value when the window ends.
-    const CONTROL_THROTTLE_MS = 300;
-    let lastControlTs = 0;
-    function nextControlTs() {
-      // Wall-clock based, but never repeats within the same millisecond.
-      lastControlTs = Math.max(Date.now(), lastControlTs + 1);
-      return lastControlTs;
+    function stopPtt() {
+      if (pttProcessor) { pttProcessor.disconnect(); pttProcessor = null; }
+      if (pttContext) { pttContext.close(); pttContext = null; }
+      if (pttStream) { pttStream.getTracks().forEach(t => t.stop()); pttStream = null; }
+      pttBtn.classList.remove('active');
+      pttBtn.textContent = '🎙️ Hold to Talk';
+      getEl('audioStateBadge').textContent = 'Ready';
     }
 
-    // Centralized control sender used by data-control bindings and ad-hoc actions.
-    function sendControl(param, val) {
-      try {
-        // Update local UI state immediately so the client reflects server-side
-        // changes without needing to re-fetch /info.json.
-        try { updateLocalLensSetting(param, val); } catch (_) { }
-        return fetch('/?' + encodeURIComponent(param) + '=' + encodeURIComponent(val) + '&ts=' + nextControlTs()).catch(() => { });
-      } catch (_) { /* swallow */ }
+    pttBtn.addEventListener('mousedown', startPtt);
+    pttBtn.addEventListener('mouseup', stopPtt);
+    pttBtn.addEventListener('mouseleave', stopPtt);
+    pttBtn.addEventListener('touchstart', e => { e.preventDefault(); startPtt(); });
+    pttBtn.addEventListener('touchend', e => { e.preventDefault(); stopPtt(); });
+
+    // Rotation shortcut buttons
+    function setRotation(deg) {
+      rotate = deg;
+      sendControl('rotate', deg.toString());
+      const b = getEl('rotateVal');
+      if (b) b.textContent = `${deg}°`;
     }
 
-    // Map control parameter names to the `lensSettings` keys used in `info.json`.
-    function toLensKey(param) {
-      if (!param) return null;
-      if (param === 'focus' || param === 'focus_distance') return 'focusDistance';
-      if (param === 'snapshot_res') return 'snapshotRes';
-      // Motion detection is a global (camera-independent) setting, not a lens setting.
-      if (param === 'motion_detection_enabled' || param === 'motion_sensitivity') return null;
-      return param.replace(/_([a-z])/g, (m, c) => c.toUpperCase());
+    function setResolution(res) {
+      desiredResolution = res;
+      sendControl('resolution', res);
     }
 
-    function normalizeValueForKey(key, val) {
-      if (val === null || val === undefined) return val;
-      // Numeric settings should be stored as numbers when possible
-      if (['zoom', 'exposure', 'rotate', 'scale', 'contrast', 'focusDistance'].includes(key)) {
-        const n = parseFloat(val);
-        return Number.isFinite(n) ? n : val;
-      }
-      return val;
+    function setCamera(camId) {
+      currentCamera = camId;
+      sendControl('camera', camId);
+      populateResolutions();
     }
 
-    // Keep the client-side `cameraList` in sync with recently-sent control values.
-    function updateLocalLensSetting(param, val) {
-      const key = toLensKey(param);
-      if (!key) return;
-      const cam = cameraList.find(c => c?.id === currentCamera);
-      if (!cam) return;
-      cam.lensSettings = cam.lensSettings || {};
-      cam.lensSettings[key] = normalizeValueForKey(key, val);
-      // Reflect the change in the visible controls without re-sending to server
-      try { applyStreamSettings(cam.lensSettings); } catch (_) { }
+    function setStreamResolution(w, h) {
+      const label = `${w}×${h}`;
+      const badge = getEl('resLiveBadge');
+      if (badge) badge.textContent = label;
     }
 
-    function formatControlValue(el) {
-      const v = el.value;
-      switch (el.dataset.fmt) {
-        case 'suffix':
-          // Format zoom with one decimal place, keep others as-is
-          if (el.id === 'zoom') {
-            const n = parseFloat(v);
-            return (isFinite(n) ? n.toFixed(1) : v) + (el.dataset.suffix || '');
-          }
-          return v + (el.dataset.suffix || '');
-        case 'focus': {
-          const n = parseFloat(v);
-          return n < 0 ? 'Auto' : n.toFixed(2);
-        }
-        default:
-          return v;
-      }
+    function takeSnapshot() {
+      const url = `/video/snapshot?camera=${encodeURIComponent(currentCamera || 'current')}&t=${Date.now()}`;
+      window.open(url, '_blank');
     }
 
-    function bindControl(el) {
+    // Auto data-control wiring for sliders and inputs
+    document.querySelectorAll('[data-control]').forEach(el => {
       const param = el.dataset.control;
-      if (!param) return;
-      const badge = el.dataset.badge ? getElById(el.dataset.badge) : null;
-
-      // Per-control throttle state
-      let lastSentAt = 0;
-      let lastSentValue = null;
-      let timer = null;
-      let pendingValue = null;
-
-      // Buttons send their configured value immediately on click
-      if (el.tagName === 'BUTTON') {
-        el.addEventListener('click', () => {
-          const val = el.dataset.value !== undefined ? el.dataset.value : (el.value !== undefined ? el.value : '');
-          if (badge) badge.innerText = val;
-          // Rotate buttons (0°/90°/180°/270°) must also move the slider thumb, update the local
-          // `rotate`, and format the badge so buttons and slider never disagree about the position.
-          if (param === 'rotate') {
-            const v = parseInt(val, 10) || 0;
-            rotate = ((v % 360) + 360) % 360;
-            const slider = getElById('rotate');
-            if (slider) {
-              slider.value = String(rotate);
-              if (badge) badge.innerText = formatControlValue(slider);
-            }
-          }
-          sendControl(param, val);
-        });
-        return;
-      }
-
-      function dispatchValue(val) {
-        if (val === lastSentValue) {
-          // Update timestamp so subsequent throttles are measured from now
-          lastSentAt = Date.now();
-          return;
-        }
-        lastSentValue = val;
-        lastSentAt = Date.now();
-        sendControl(param, val);
-      }
-
-      function scheduleSend() {
-        const now = Date.now();
-        const since = now - lastSentAt;
-        const wait = Math.max(0, CONTROL_THROTTLE_MS - since);
-        if (wait === 0) {
-          const val = pendingValue !== null ? pendingValue : el.value;
-          pendingValue = null;
-          dispatchValue(val);
-        } else {
-          // Always refresh timer so the last value is sent at the end
-          if (timer) clearTimeout(timer);
-          timer = setTimeout(() => {
-            timer = null;
-            const val = pendingValue !== null ? pendingValue : el.value;
-            pendingValue = null;
-            dispatchValue(val);
-          }, wait);
-        }
-      }
+      const badgeId = el.dataset.badge;
+      const fmt = el.dataset.fmt;
+      const suffix = el.dataset.suffix || '';
 
       el.addEventListener('input', () => {
-        if (badge) badge.innerText = formatControlValue(el);
-        if (el.dataset.setview) setView(el.dataset.setview);
-        // If this is the rotate slider, update the local rotation immediately
-        if (param === 'rotate') {
-          try {
-            const v = parseInt(el.value, 10) || 0;
-            rotate = ((v % 360) + 360) % 360;
-          } catch (_) { }
-        }
-        pendingValue = el.value;
-        scheduleSend();
-      });
-
-      el.addEventListener('change', () => {
-        // On final change (release), cancel any pending timer and send
-        if (timer) { clearTimeout(timer); timer = null; }
-        pendingValue = null;
-        try { dispatchValue(el.value); } catch (_) { /* swallow */ }
-      });
-
-      if (badge) badge.innerText = formatControlValue(el);
-    }
-
-    document.querySelectorAll('[data-control]').forEach(bindControl);
-
-    function getUserScale() {
-      const el = getElById('scale');
-      if (!el) return 1;
-      try {
-        const n = parseFloat(el.value);
-        return (isFinite(n) && n > 0) ? n : 1;
-      } catch (_) { return 1; }
-    }
-
-    getElById('resetDefaultsBtn')?.addEventListener('click', () => {
-      try {
-        const cam = selectedCameraInfo();
-        const id = cam ? cam.id : '';
-        if (!id) return;
-        fetch('/?resetCamera=' + encodeURIComponent(id), { method: 'GET', credentials: 'include' })
-          .then(() => {
-            loadDeviceInfo(true);
-            setView("fit")
-          }).catch(() => {
-            // On failure, refresh device info
-            loadDeviceInfo(true);
-          });
-      } catch (_) { /* ignore */ }
-    });
-
-    function startMjpegStream() {
-      if (!streamCanvas)
-        return;
-      if (mjpegRunning && mjpegAbort) {
-        return;
-      }
-      if (mjpegAbort)
-        mjpegAbort.abort();
-      const controller = new AbortController();
-      mjpegAbort = controller;
-      mjpegRunning = true;
-      frameQueue = [];
-      lastDrawn = null;
-      showStreamLoading();
-      const ctx = streamCanvas.getContext('2d');
-      fetch(STREAM_SRC, {
-        cache: 'no-store',
-        credentials: 'include',
-        signal: controller.signal
-      })
-        .then(res => {
-          const reader = res
-            .body
-            .getReader();
-          let buffer = new Uint8Array(0);
-          function concat(a, b) {
-            const c = new Uint8Array(a.length + b.length);
-            c.set(a, 0);
-            c.set(b, a.length);
-            return c;
-          }
-          function findMarker(buf, marker) {
-            for (let i = 0; i < buf.length - 1; i++) {
-              if (buf[i] === 0xFF && buf[i + 1] === marker)
-                return i;
-            }
-            return -1;
-          }
-          function process() {
-            while (true) {
-              const soi = findMarker(buffer, 0xD8);
-              if (soi < 0)
-                break;
-              const rest = buffer.subarray(soi);
-              const eoiRel = findMarker(rest, 0xD9);
-              if (eoiRel < 0)
-                break;
-              const eoi = soi + eoiRel + 2;
-              const frameBytes = buffer.subarray(soi, eoi);
-              buffer = buffer.subarray(eoi);
-              const blob = new Blob([frameBytes], { type: 'image/jpeg' });
-              createImageBitmap(blob)
-                .then(bitmap => {
-                  frameQueue.push({ ts: performance.now(), bmp: bitmap });
-                  if (frameQueue.length > 180)
-                    frameQueue.shift();
-                }
-                )
-                .catch(() => { });
-            }
-          }
-          function pump() {
-            return reader
-              .read()
-              .then(({ done, value }) => {
-                if (done)
-                  return;
-                if (value?.length) {
-                  buffer = concat(buffer, value);
-                  process();
-                }
-                return pump();
-              });
-          }
-          pump().catch(() => { mjpegRunning = false; });
-          function drawLoop() {
-            if (!drawing)
-              return;
-            const now = performance.now();
-            const effDelay = (audioEl && !audioEl.muted)
-              ? videoDelayMs
-              : 0;
-            let candidate = null;
-            while (frameQueue.length && frameQueue[0].ts <= now - effDelay) {
-              candidate = frameQueue.shift();
-            }
-            if (!candidate && frameQueue.length) {
-              const idx = frameQueue.findIndex(f => f.ts > now - effDelay);
-              if (idx > 0) {
-                candidate = frameQueue
-                  .splice(0, idx)
-                  .pop() || null;
-              }
-            }
-            if (candidate?.bmp) {
-              const size = targetCanvasSize(candidate.bmp);
-              const w = size.w;
-              const h = size.h;
-              applyCanvasSize(size);
-              const iw = candidate.bmp.width;
-              const ih = candidate.bmp.height;
-              const userScale = getUserScale();
-              const scale = Math.min(w / iw, h / ih) * userScale;
-              const dw = Math.max(1, Math.floor(iw * scale));
-              const dh = Math.max(1, Math.floor(ih * scale));
-              const dx = Math.floor((w - dw) / 2);
-              const dy = Math.floor((h - dh) / 2);
-              ctx.clearRect(0, 0, w, h);
-              ctx.drawImage(candidate.bmp, dx, dy, dw, dh);
-              lastDrawn = candidate.bmp;
-              setStreamResolution(iw, ih);
-              hideStreamLoading();
-            }
-            requestAnimationFrame(drawLoop);
-          }
-          if (!drawing) {
-            drawing = true;
-            requestAnimationFrame(drawLoop);
-          }
-        })
-        .catch(() => { mjpegRunning = false; });
-    }
-
-    loadDeviceInfo(true).finally(() => initStreamUi());
-    setInterval(() => loadDeviceInfo(false), 60000);
-
-    function stopMjpegStream() {
-      if (mjpegAbort) {
-        try { mjpegAbort.abort(); } catch (_) { }
-      }
-      mjpegAbort = null;
-      mjpegRunning = false;
-      drawing = false;   // let the rAF draw loop exit (esp. when switching to H.264)
-    }
-
-    function showStreamLoading() {
-      const el = getElById('streamLoading');
-      if (el) el.style.display = 'flex';
-    }
-
-    function hideStreamLoading() {
-      const el = getElById('streamLoading');
-      if (el) el.style.display = 'none';
-    }
-
-    // ---- Stream mode: MJPEG (universal) vs H.264 decoded in-browser via WebCodecs ----
-    let streamMode = 'mjpeg';
-    try {
-      // Persisted preference (may throw in some environments)
-      streamMode = localStorage.getItem('streamMode') || streamMode;
-    } catch (_) { }
-    // The rotate= control is the only rotation source and is baked into the H.264 stream server-side
-    // aligned to the nearest 90°. `rotate` tracks the raw slider value; the player applies the small
-    // residual (rotate − nearest90) on top of the baked stream so the preview matches the slider,
-    // while the raw H.264/MJPEG streams remain rotating in the server's 90° steps for other clients.
-    let rotate = 0;
-    const h264Supported = ('VideoDecoder' in window) && ('EncodedVideoChunk' in window);
-    const baseUrl = () => location.protocol + '//' + location.host;
-
-    function initStreamUi() {
-      const h = getElById('modeH264Btn');
-      const mj = getElById('modeMjpegBtn');
-      if (mj) mj.addEventListener('click', () => setStreamMode('mjpeg'));
-      if (h) h.addEventListener('click', () => {
-        if (!window.isSecureContext) {
-          alert('H.264 requires HTTPS/TLS. Enable TLS in the app settings to use H.264');
-          return;
-        }
-        if (!h264Supported) {
-          alert('H.264 is not supported in this browser (WebCodecs unavailable)');
-          return;
-        }
-        setStreamMode('h264');
-      });
-      if (h) {
-        if (!window.isSecureContext) {
-          // Keep the button clickable so we can show an explanatory alert when users try to use it.
-          h.textContent = 'H.264 (N/A)';
-          h.title = 'In-browser H.264 requires HTTPS/TLS (enable TLS in app settings)';
-        } else if (!h264Supported) {
-          h.title = 'This browser has no WebCodecs H.264 decoder';
-        }
-      }
-      // Restore persisted preference where possible; fall back to highest supported mode.
-      try {
-        const pref = localStorage.getItem('streamMode') || (window.isSecureContext && h264Supported ? 'h264' : 'mjpeg');
-        setStreamMode(pref);
-      } catch (_) {
-        setStreamMode('mjpeg');
-      }
-    }
-
-    function setStreamMode(mode) {
-      // If H.264 isn't supported or we're not in a secure context, force MJPEG
-      if (mode === 'h264' && (!h264Supported || !window.isSecureContext)) mode = 'mjpeg';
-      streamMode = mode;
-      try { localStorage.setItem('streamMode', mode); } catch (_) { }
-      const mj = getElById('modeMjpegBtn'), h = getElById('modeH264Btn');
-      if (mj) mj.className = 'btn' + (mode === 'mjpeg' ? ' active' : '');
-      if (h && !h.disabled) h.className = 'btn' + (mode === 'h264' ? ' active' : '');
-
-      if (avDelay && avDelayVal) {
-        const currentVal = avDelay.value;
-        const prevDefault = mode === 'h264' ? '2.5' : '2.3';
-        if (currentVal === prevDefault) {
-          const defaultVal = mode === 'h264' ? '2.3' : '2.5';
-          avDelay.value = defaultVal;
-          avDelayVal.textContent = `${defaultVal}s`;
-          videoDelayMs = parseFloat(defaultVal) * 1000;
-        }
-      }
-
-      if (mode === 'mjpeg') {
-        stopH264Stream();
-        startMjpegStream();
-      } else {
-        stopMjpegStream();
-        startH264Stream();
-      }
-    }
-
-    // Minimal WebCodecs H.264 player: parse the Annex-B elementary stream into access
-    // units and feed them to a VideoDecoder, drawing frames onto the same canvas.
-    let h264Abort = null;
-    let h264Decoder = null;
-    function stopH264Stream() {
-      if (h264Abort) { try { h264Abort.abort(); } catch (_) { } h264Abort = null; }
-      if (h264Decoder) { try { h264Decoder.close(); } catch (_) { } h264Decoder = null; }
-    }
-    async function startH264Stream() {
-      if (!h264Supported) return;
-      stopH264Stream();
-      showStreamLoading();
-      const ctx = streamCanvas.getContext('2d');
-      const controller = new AbortController();
-      h264Abort = controller;
-      let configured = false, ts = 0;
-      let au = [], auHasVcl = false, auKey = false;
-      const h264Queue = [];
-      let lastSpsKey = null;
-      const makeDecoder = () => new VideoDecoder({
-        output: (frame) => {
-          try {
-            const fw = frame.displayWidth, fh = frame.displayHeight;
-            // The server bakes the rotate= control into the raw stream aligned to the nearest
-            // 90° (H.264 rotation is quantized; arbitrary angles are not resampled). Rotate the
-            // canvas only by the small residual so the preview tracks the slider exactly — the
-            // residual is 0 at every 90° step, so this never double-rotates the baked rotation.
-            const q = (Math.round(rotate / 90) * 90 + 360) % 360;
-            let residual = rotate - q;
-            if (residual > 180) residual -= 360;
-            if (residual < -180) residual += 360;
-            let filter = 'none';
-            try {
-              const contrastEl = getElById('contrast');
-              if (contrastEl) {
-                const c = parseInt(contrastEl.value, 10) || 0;
-                filter = `contrast(${100 + c}%)`;
-              }
-            } catch (_) { }
-            ctx.filter = filter;
-            if (residual !== 0) {
-              const a = Math.abs(residual) * Math.PI / 180;
-              const cos = Math.cos(a), sin = Math.sin(a);
-              const cw = Math.max(1, Math.ceil(Math.abs(fw * cos) + Math.abs(fh * sin)));
-              const ch = Math.max(1, Math.ceil(Math.abs(fw * sin) + Math.abs(fh * cos)));
-              const size = targetCanvasSize({ width: cw, height: ch });
-              applyCanvasSize(size);
-              const s = Math.min(size.w / cw, size.h / ch) * getUserScale();
-              ctx.clearRect(0, 0, size.w, size.h);
-              ctx.save();
-              ctx.translate(size.w / 2, size.h / 2);
-              ctx.rotate(residual * Math.PI / 180);
-              ctx.drawImage(frame, -fw * s / 2, -fh * s / 2, fw * s, fh * s);
-              ctx.restore();
-            } else {
-              const size = targetCanvasSize({ width: fw, height: fh });
-              applyCanvasSize(size);
-              const s = Math.min(size.w / fw, size.h / fh) * getUserScale();
-              ctx.clearRect(0, 0, size.w, size.h);
-              ctx.drawImage(frame, (size.w - fw * s) / 2, (size.h - fh * s) / 2, fw * s, fh * s);
-            }
-            ctx.filter = 'none';
-            hideStreamLoading();
-          } finally { frame.close(); }
-        },
-        error: (e) => console.error('H.264 decode:', e)
-      });
-      let decoder = makeDecoder();
-      h264Decoder = decoder;
-      const hex = (n) => n.toString(16).padStart(2, '0');
-      const flush = () => {
-        if (!configured || !au.length) { au = []; auHasVcl = false; auKey = false; return; }
-        let len = au.reduce((a, n) => a + 4 + n.length, 0);
-        const data = new Uint8Array(len); let o = 0;
-        for (const n of au) { data[o + 3] = 1; o += 4; data.set(n, o); o += n.length; }  // 00 00 00 01 start code
-        const effDelay = (audioEl && !audioEl.muted) ? videoDelayMs : 0;
-        if (effDelay === 0 && !h264Queue.length) {
-          try { decoder.decode(new EncodedVideoChunk({ type: auKey ? 'key' : 'delta', timestamp: ts, data })); ts += 33333; }
-          catch (e) { console.error('decode:', e); }
-        } else {
-          h264Queue.push({
-            receiveTime: performance.now(),
-            type: auKey ? 'key' : 'delta',
-            data: data
-          });
-        }
-        au = []; auHasVcl = false; auKey = false;
-      };
-      const onNal = (nal) => {
-        if (!nal.length) return;
-        const type = nal[0] & 0x1f;
-        if (type === 7) {
-          // Every IDR carries a fresh SPS. Reconfigure only when the stream itself
-          // restarted with new encoding parameters (e.g. rotation swapped the encoder
-          // dimensions), not on ordinary periodic keyframes with identical SPS.
-          const spsKey = nal.length + ':' + Array.from(nal, hex).join('');
-          if (configured && spsKey !== lastSpsKey) {
-            h264Queue.length = 0;
-            au = []; auHasVcl = false; auKey = false;
-            try { decoder.close(); } catch (_) { }
-            decoder = makeDecoder();
-            h264Decoder = decoder;
-            configured = false;
-          }
-          if (!configured) {
-            lastSpsKey = spsKey;
-            try { decoder.configure({ codec: 'avc1.' + hex(nal[1]) + hex(nal[2]) + hex(nal[3]), optimizeForLatency: true }); configured = true; }
-            catch (e) { console.error('configure:', e); }
-          }
-        }
-        const isVcl = type >= 1 && type <= 5;
-        if (isVcl && auHasVcl) flush();            // a new VCL starts the next access unit
-        au.push(nal.slice());
-        if (isVcl) { auHasVcl = true; if (type === 5) auKey = true; }
-      };
-      function playLoop() {
-        if (controller.signal.aborted) return;
-        const now = performance.now();
-        const effDelay = (audioEl && !audioEl.muted) ? videoDelayMs : 0;
-        while (h264Queue.length && h264Queue[0].receiveTime <= now - effDelay) {
-          const item = h264Queue.shift();
-          try {
-            decoder.decode(new EncodedVideoChunk({ type: item.type, timestamp: ts, data: item.data }));
-            ts += 33333;
-          } catch (e) { console.error('decode:', e); }
-        }
-        if (h264Queue.length > 300) {
-          const keyframeIdx = h264Queue.findIndex((item, index) => index > 0 && item.type === 'key');
-          if (keyframeIdx !== -1) {
-            h264Queue.splice(0, keyframeIdx);
-          } else {
-            h264Queue.length = 0;
-          }
-        }
-        requestAnimationFrame(playLoop);
-      }
-      requestAnimationFrame(playLoop);
-      let resp;
-      try { resp = await fetch(baseUrl() + '/video/h264', { signal: controller.signal }); } catch (_) { return; }
-      const reader = resp.body.getReader();
-      let buf = new Uint8Array(0);
-      try {
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done || controller.signal.aborted) break;
-          const merged = new Uint8Array(buf.length + value.length);
-          merged.set(buf); merged.set(value, buf.length); buf = merged;
-          // Collect start-code positions, emit each complete NAL, keep the trailing partial.
-          const starts = [];
-          for (let i = 0; i + 3 < buf.length;) {
-            if (buf[i] === 0 && buf[i + 1] === 0 && buf[i + 2] === 1) { starts.push([i, i + 3]); i += 3; }
-            else if (buf[i] === 0 && buf[i + 1] === 0 && buf[i + 2] === 0 && buf[i + 3] === 1) { starts.push([i, i + 4]); i += 4; }
-            else i++;
-          }
-          if (starts.length < 2) {
-            // Guard against unbounded growth if the response isn't an Annex-B stream (e.g. an error page).
-            if (buf.length > 8000000) { console.error('H.264: no start codes found, resetting buffer'); buf = new Uint8Array(0); }
-            continue;
-          }
-          for (let k = 0; k < starts.length - 1; k++) onNal(buf.subarray(starts[k][1], starts[k + 1][0]));
-          buf = buf.slice(starts[starts.length - 1][0]);
-        }
-      } catch (_) { }
-    }
-
-    document.addEventListener('visibilitychange', () => {
-      if (document.hidden) {
-        // Only stop video stream when backgrounded, keep audio playing if it was started
-        stopMjpegStream();
-        stopH264Stream();
-      } else {
-        // Restart the currently selected stream on foreground
-        if (streamMode === 'h264') startH264Stream(); else startMjpegStream();
-      }
-    });
-
-    function camerasForFacing(facing) {
-      return cameraList.filter(camera => camera?.facing === facing);
-    }
-
-    function currentCameraFacing() {
-      const selected = cameraList.find(camera => camera.id === currentCamera);
-      return selected ? selected.facing : currentCamera;
-    }
-
-    function lensLabel(camera, index) {
-      return camera.label || `${camera.facing === 'front' ? 'Front' : 'Back'} ${camera.id || index + 1}`;
-    }
-
-    function cameraOptionLabel(camera, index) {
-      const label = lensLabel(camera, index);
-      return label.replace(/^(Back|Front)\s+/i, '');
-    }
-
-    function appendCameraGroup(select, facing, label) {
-      const cameras = camerasForFacing(facing);
-      if (!cameras.length) return;
-      const group = document.createElement('optgroup');
-      group.label = label;
-      cameras.forEach((camera, index) => {
-        const option = document.createElement('option');
-        option.value = camera.id;
-        option.textContent = cameraOptionLabel(camera, index);
-        group.appendChild(option);
-      });
-      select.appendChild(group);
-    }
-
-    function updateCameraSelectValue() {
-      const select = getElById('cameraSelect');
-      if (!select) return;
-      const selected = cameraList.find(camera => camera.id === currentCamera);
-      const facing = currentCameraFacing();
-      const fallback = selected || camerasForFacing(facing)[0] || cameraList[0];
-      if (fallback) {
-        select.value = fallback.id;
-        // Update facing badge (Front / Back)
-        try {
-          const badge = getElById('cameraFacingBadge');
+        let val = el.value;
+        if (badgeId) {
+          const badge = getEl(badgeId);
           if (badge) {
-            const f = (fallback.facing || '').toLowerCase();
-            const label = f === 'front' ? 'Front' : (f === 'back' ? 'Back' : (fallback.facing || '\u2014'));
-            badge.textContent = label;
+            if (fmt === 'focus') {
+              badge.textContent = (parseFloat(val) < 0) ? 'Auto' : parseFloat(val).toFixed(2);
+            } else {
+              badge.textContent = val + suffix;
+            }
           }
-        } catch (_) { }
-      }
-    }
-
-    function updateZoomMax() {
-      try {
-        const zoomEl = getElById('zoom');
-        if (!zoomEl) return;
-        const cam = selectedCameraInfo();
-        const max = (cam?.zoom?.max) ? parseFloat(cam.zoom.max) : 8;
-        // Some cameras may report a min zoom (e.g. ultra-wide starting at 0)
-        const min = (cam?.zoom?.min) ? parseFloat(cam.zoom.min) : 0.1;
-        // Ensure sensible min/max values
-        zoomEl.max = String((isFinite(max) && max > 0) ? parseFloat(max).toFixed(1) : '8.0');
-        zoomEl.min = String((isFinite(min) && min >= 0) ? parseFloat(min).toFixed(1) : '0.1');
-        if (parseFloat(zoomEl.value) > parseFloat(zoomEl.max)) {
-          zoomEl.value = zoomEl.max;
-          const b = getElById('zoomVal'); if (b) b.textContent = formatControlValue(zoomEl);
         }
-      } catch (_) { }
-    }
+        if (param === 'scale') {
+          userScale = parseFloat(val) || 1.0;
+        }
+        sendControl(param, val);
+      });
+    });
 
-    function renderCameraControls() {
-      const select = getElById('cameraSelect');
-      if (!select) return;
-      select.innerHTML = '';
-      appendCameraGroup(select, 'back', 'Back');
-      appendCameraGroup(select, 'front', 'Front');
-      updateCameraSelectValue();
-      populateResolutions();
-      updateZoomMax();
-    }
-
-    // Resolution dropdown is built from the sizes the camera reports, plus "Auto".
-    let desiredResolution = 'auto';
-
-    function selectedCameraInfo() {
-      return cameraList.find(camera => camera.id === currentCamera)
-        || camerasForFacing(currentCameraFacing())[0]
-        || cameraList[0]
-        || null;
-    }
-
-    function resolutionLabel(w, h) {
-      return w + '×' + h + ' · ' + ((w * h) / 1e6).toFixed(1) + ' MP';
-    }
+    getEl('resetDefaultsBtn').addEventListener('click', () => {
+      if (!currentCamera) return;
+      fetch(`/?resetCamera=${encodeURIComponent(currentCamera)}&ts=${nextControlTs()}`).then(() => {
+        showToast('Camera settings reset to defaults');
+        setTimeout(() => loadDeviceInfo(true), 400);
+      });
+    });
 
     function populateResolutions() {
-      const select = getElById('resolutionSelect');
+      const select = getEl('resolutionSelect');
       if (!select) return;
-      const cam = selectedCameraInfo();
+      const cam = cameraList.find(c => c.id === currentCamera) || cameraList[0];
       const sizes = (cam && Array.isArray(cam.sizes)) ? cam.sizes : [];
-      select.innerHTML = '';
-      const auto = document.createElement('option');
-      auto.value = 'auto';
-      auto.textContent = 'Auto';
-      select.appendChild(auto);
+
+      select.innerHTML = '<option value="auto">Auto</option>';
       sizes.forEach(s => {
         if (!s || !s.w || !s.h) return;
         const opt = document.createElement('option');
-        opt.value = s.w + 'x' + s.h;
-        opt.textContent = resolutionLabel(s.w, s.h);
+        opt.value = `${s.w}x${s.h}`;
+        opt.textContent = `${s.w}×${s.h}`;
         select.appendChild(opt);
       });
-      const available = Array.from(select.options).some(o => o.value === desiredResolution);
-      if (available) {
-        select.value = desiredResolution;
-      } else if (desiredResolution !== 'auto') {
-        // Chosen size isn't supported by this camera: reconcile to Auto so the
-        // dropdown, desiredResolution and the server pref stay in sync.
-        setResolution('auto');
-        select.value = 'auto';
-      } else {
-        select.value = 'auto';
-      }
-    }
-
-    function setResolution(value) {
-      desiredResolution = value;
-      sendControl('resolution', value);
-    }
-
-    function setCamera(camera) {
-      // Ask the server to switch cameras, then refresh device info so the
-      // UI reflects any camera-specific settings the server provides.
-      sendControl('camera', camera);
-      // Update local selection immediately for snappy UI
-      const newCameraInfo = cameraList.find(c => c.id === camera);
-      currentCamera = camera;
-      updateCameraSelectValue();
-      populateResolutions();
-      updateZoomMax();
-
-      // Front-facing cameras are slower on H.264 for most Android devices,
-      // so automatically switch to MJPEG when selecting a front camera.
-      // Switch back to H.264 for rear cameras when available.
-      if (newCameraInfo?.facing === 'front' && streamMode !== 'mjpeg') {
-        setStreamMode('mjpeg');
-      } else if (newCameraInfo?.facing === 'back' && streamMode === 'mjpeg' && h264Supported && window.isSecureContext) {
-        setStreamMode('h264');
-      }
-      // Only force the flash off when we know for sure we're switching to the
-      // front-facing camera. Rear lenses share the device flash, and some
-      // report hasFlash=false on their physical characteristics even though
-      // the torch works, so leave the flash alone between them.
-      if (torchState === 'on' && newCameraInfo?.facing === 'front') {
-        try {
-          sendControl('torch', 'off');
-        } catch (_) { }
-        setTorchState('off');
-      }
-      updateFlashButton();
-
-      // If the server provided per-camera lens settings in the camera object, apply
-      // them immediately
-      try {
-        if (newCameraInfo?.lensSettings) {
-          // Ensure all values in lensSettings are properly normalized (e.g., string to number)
-          for (const key in newCameraInfo.lensSettings) {
-            newCameraInfo.lensSettings[key] = normalizeValueForKey(key, newCameraInfo.lensSettings[key]);
-          }
-          // applyStreamSettings expects camelCase keys (e.g. focusDistance)
-          applyStreamSettings(newCameraInfo.lensSettings);
-        }
-      } catch (_) { }
-    }
-
-    function setView(mode) {
-      const f = getElById('fitBtn');
-      const o = getElById('origBtn');
-
-      if (mode === 'fit') {
-        f.className = 'btn active';
-        o.className = 'btn';
-        viewMode = 'fit';
-      } else {
-        f.className = 'btn';
-        o.className = 'btn active';
-        viewMode = 'original';
-      }
-      applyCanvasSize(targetCanvasSize(lastDrawn));
-    }
-
-    function toggleFullscreen() {
-      const container = streamContainer;
-      if (!container) return;
-
-      if (!document.fullscreenElement && !document.webkitFullscreenElement) {
-        if (container.requestFullscreen) {
-          container.requestFullscreen();
-        } else if (container.webkitRequestFullscreen) {
-          container.webkitRequestFullscreen();
-        }
-      } else {
-        if (document.exitFullscreen) {
-          document.exitFullscreen();
-        } else if (document.webkitExitFullscreen) {
-          document.webkitExitFullscreen();
-        }
-      }
-    }
-
-    function onFullscreenChange() {
-      requestAnimationFrame(() => {
-        applyCanvasSize(targetCanvasSize(lastDrawn));
-      });
-    }
-
-    document.addEventListener('fullscreenchange', onFullscreenChange);
-    document.addEventListener('webkitfullscreenchange', onFullscreenChange);
-    window.addEventListener('resize', () => {
-      if (document.fullscreenElement || document.webkitFullscreenElement) {
-        applyCanvasSize(targetCanvasSize(lastDrawn));
-      }
-    });
-
-    function applyStreamSettings(settings) {
-      if (!settings) return;
-      if (settings.cameraId) {
-        currentCamera = settings.cameraId;
-        updateCameraSelectValue();
-      }
-      // Reconcile torch state with the server: the page starts blind ('off'), but the service may
-      // have the torch lit (restored from prefs on its last camera start).
-      if (settings.deviceHasFlash !== undefined) deviceHasFlash = !!settings.deviceHasFlash;
-      if (settings.torch === 'on' || settings.torch === 'off') setTorchState(settings.torch);
-      if (settings.streamRes) desiredResolution = settings.streamRes;
-      if (settings.rotate != null) {
-        rotate = parseInt(settings.rotate, 10) || 0;
-        // Reflect server-provided rotation in the UI
-        const el = getElById('rotate');
-        const b = getElById('rotateVal');
-        try { if (el) el.value = String(rotate); if (b) b.textContent = `${rotate}°`; } catch (_) { }
-      }
-      // Snapshot resolution: prefer server setting, otherwise default to 'stream'.
-      // Some older clients/servers use 'match' to mean the stream — normalize it to server value 'stream'.
-      const sr = getElById('snapshotRes');
-      if (sr) {
-        let sVal = (settings.snapshotRes !== undefined && settings.snapshotRes !== null) ? String(settings.snapshotRes) : 'stream';
-        if (sVal === 'match') sVal = 'stream';
-        sr.value = sVal;
-      }
-      populateResolutions();
-      const zoom = getElById('zoom');
-      const zoomVal = getElById('zoomVal');
-      if (zoom && settings.zoom) {
-        zoom.value = settings.zoom;
-        if (zoomVal) zoomVal.textContent = `${settings.zoom}x`;
-      }
-      const scale = getElById('scale');
-      const scaleVal = getElById('scaleVal');
-      if (scale && settings.scale) {
-        scale.value = settings.scale;
-        if (scaleVal) scaleVal.textContent = `${settings.scale}x`;
-      }
-      const exposure = getElById('exposure');
-      const exposureVal = getElById('exposureVal');
-      if (exposure && settings.exposure != null) {
-        exposure.value = settings.exposure;
-        if (exposureVal) exposureVal.textContent = settings.exposure;
-      }
-      const contrast = getElById('contrast');
-      const contVal = getElById('contVal');
-      if (contrast && settings.contrast != null) {
-        contrast.value = settings.contrast;
-        if (contVal) contVal.textContent = settings.contrast;
-      }
-      const mirrorEl = getElById('mirrorCheckbox');
-      if (mirrorEl && settings.mirror !== undefined) {
-        mirrorEl.checked = settings.mirror === 'true';
-      }
-
-      const fps = getElById('fps');
-      if (fps && settings.fps) {
-        fps.value = settings.fps;
-      }
-      // Motion detection is only meaningful with ONVIF (event reporting), so keep its
-      // controls hidden unless the server reports ONVIF as enabled.
-      if (settings.onvifEnabled !== undefined) {
-        const onvif = settings.onvifEnabled;
-        const enabled = onvif === true || onvif === 1 || onvif === 'true' || onvif === 'on' || onvif === '1';
-        const motionSettings = getElById('motionSettings');
-        if (motionSettings) motionSettings.style.display = enabled ? '' : 'none';
-      }
-      const motionEl = getElById('motionCheckbox');
-      if (motionEl && settings.motionDetectionEnabled !== undefined) {
-        const v = settings.motionDetectionEnabled;
-        // Accept both JSON booleans and string forms ("true"/"false"/"on"/"off"/"1"/"0").
-        motionEl.checked = v === true || v === 1 || v === 'true' || v === 'on' || v === '1';
-      }
-      const audioGain = getElById('audioGain');
-      const audioGainVal = getElById('audioGainVal');
-      if (audioGain && settings.audioGain) {
-        audioGain.value = settings.audioGain;
-        if (audioGainVal) audioGainVal.textContent = settings.audioGain;
-      }
-
-      // Populate any remaining controls that use `data-control` from the settings
-      // mapping snake_case -> camelCase (e.g. audio_gain -> audioGain).
-      const toCamel = (s) => s.replace(/_([a-z])/g, (m, c) => c.toUpperCase());
-      document.querySelectorAll('[data-control]').forEach(el => {
-        const param = el.dataset.control;
-        if (!param) return;
-        const key = toCamel(param);
-        const serverVal = settings[key];
-        // If server provided a value, set it in the control (but don't send back).
-        if (serverVal !== undefined && serverVal !== null) {
-          try { el.value = serverVal; } catch (_) { }
-        } else {
-          // Ensure selects default to their first option if not set
-          if (el.tagName === 'SELECT' && !el.value) {
-            el.selectedIndex = 0;
-          }
-        }
-        // Update any badge showing the formatted value
-        if (el.dataset.badge) {
-          const b = getElById(el.dataset.badge);
-          if (b) b.textContent = formatControlValue(el);
-        }
-      });
-    }
-
-    // Badge showing the actual negotiated resolution (from decoded frames).
-    let lastStreamRes = '';
-    function setStreamResolution(w, h) {
-      if (!w || !h) return;
-      const label = w + '×' + h;
-      if (label === lastStreamRes) return;
-      lastStreamRes = label;
-      const badge = getElById('resolutionVal');
-      if (badge) badge.innerText = label;
-    }
-
-    function updateStatusOverlay(data) {
-      const batteryEl = getElById('batteryStatus');
-      const wifiEl = getElById('wifiStatus');
-      const overlay = getElById('statusOverlay');
-
-      if (batteryEl && typeof data.batteryPercent === 'number') {
-        if (data.batteryPercent < 0) {
-          batteryEl.style.display = 'none';
-        } else {
-          batteryEl.style.display = 'flex';
-          let batteryEmoji = '🔋';
-          if (data.batteryPercent < 15) {
-            batteryEmoji = '🪫';
-          }
-          batteryEl.innerHTML = `${batteryEmoji} ${data.batteryPercent}%`;
-        }
-      }
-
-      if (wifiEl && typeof data.wifiStrength === 'number') {
-        if (data.wifiStrength < 0) {
-          wifiEl.style.display = 'none';
-        } else {
-          wifiEl.style.display = 'flex';
-          let wifiEmoji = '🛜';
-          wifiEl.innerHTML = `${wifiEmoji} ${data.wifiStrength}%`;
-        }
-      }
-
-      if (overlay) {
-        const hasStatus = (batteryEl && batteryEl.style.display !== 'none') ||
-          (wifiEl && wifiEl.style.display !== 'none');
-        overlay.style.display = hasStatus ? 'flex' : 'none';
-      }
+      select.value = desiredResolution || 'auto';
     }
 
     function loadDeviceInfo(applySettings) {
@@ -1524,336 +1252,74 @@
         .then(res => res.json())
         .then(data => {
           cameraList = Array.isArray(data.cameras) ? data.cameras : [];
-          if (applySettings) applyStreamSettings(data.settings);
-          renderCameraControls();
-          // If server provided per-camera lens settings for the selected camera,
-          // apply them so UI controls (zoom/exposure/focus/rotate/scale/contrast)
-          // reflect the values in `/info.json` on initial load.
-          if (applySettings) {
-            try {
-              const cam = selectedCameraInfo();
-              if (cam?.lensSettings) {
-                // Ensure all values in lensSettings are properly normalized (e.g., string to number)
-                for (const key in cam.lensSettings) {
-                  cam.lensSettings[key] = normalizeValueForKey(key, cam.lensSettings[key]);
-                }
-                applyStreamSettings(cam.lensSettings);
-              }
-              // Ensure zoom max and clamps reflect newly applied lens settings
-              try { updateZoomMax(); } catch (_) { }
-            } catch (_) { }
+          const camSelect = getEl('cameraSelect');
+          camSelect.innerHTML = '';
+          cameraList.forEach(c => {
+            const opt = document.createElement('option');
+            opt.value = c.id;
+            opt.textContent = c.label || `${c.facing} (${c.id})`;
+            camSelect.appendChild(opt);
+          });
+
+          if (data.settings) {
+            const s = data.settings;
+            if (s.cameraId) {
+              currentCamera = s.cameraId;
+              camSelect.value = s.cameraId;
+            }
+            if (s.torch) setTorchState(s.torch);
+            if (s.streamRes) desiredResolution = s.streamRes;
+            if (s.fps) getEl('fps').value = s.fps;
+            if (s.quality) {
+              getEl('qualityRange').value = s.quality;
+              getEl('qualityVal').textContent = s.quality + '%';
+            }
+            if (s.bitrate) getEl('bitrateSelect').value = s.bitrate;
+            if (s.focusMode) {
+              getEl('focusModeSelect').value = s.focusMode;
+              onFocusModeChange(s.focusMode);
+            }
           }
+
+          populateResolutions();
           updateStatusOverlay(data);
-          getElById('appVersion').innerText = `v${data.appVersion}`;
-        })
-        .catch(err => {
-          console.error('Failed to fetch device info:', err);
+          if (data.appVersion) getEl('appVersion').textContent = `v${data.appVersion}`;
         })
         .finally(() => {
-          if (applySettings) {
-            getElById('controlsPanel')?.classList.remove('loading');
-            updateFlashButton();
-          }
+          controlsPanel.classList.remove('loading');
         });
     }
 
-    let isRecording = false;
-    function updateRecordingUi(statusData) {
-      const toggleBtn = getElById('recordToggleBtn');
-      isRecording = !!(statusData?.recording);
-      if (isRecording) {
-        const secs = Math.floor((statusData.durationMs || 0) / 1000);
-        const mins = Math.floor(secs / 60);
-        const remSecs = secs % 60;
-        const timeStr = `${mins}:${remSecs < 10 ? '0' : ''}${remSecs}`;
-        if (toggleBtn) {
-          toggleBtn.textContent = `⏹️ ${timeStr}`;
-          toggleBtn.style.background = '#d32f2f';
-          toggleBtn.style.borderColor = '#b71c1c';
-        }
+    function updateStatusOverlay(data) {
+      const overlay = getEl('statusOverlay');
+      const wifiEl = getEl('wifiStatus');
+      const battEl = getEl('batteryStatus');
+
+      if (data.wifiStrength !== undefined && data.wifiStrength >= 0) {
+        wifiEl.textContent = `🛜 ${data.wifiStrength}%`;
+        wifiEl.style.display = 'flex';
       } else {
-        if (toggleBtn) {
-          toggleBtn.textContent = '🔴 Record';
-          toggleBtn.style.background = '';
-          toggleBtn.style.borderColor = '';
-        }
+        wifiEl.style.display = 'none';
       }
-    }
 
-    function checkRecordingStatus() {
-      fetch('/record/status')
-        .then(r => r.json())
-        .then(data => updateRecordingUi(data))
-        .catch(() => {});
-    }
-
-    function toggleRecording() {
-      const wasRecording = isRecording;
-      const url = wasRecording ? '/record/stop' : '/record/start';
-      fetch(url, { method: 'POST' })
-        .then(r => r.json())
-        .then(data => {
-          if (data.error) {
-            alert('Recording Message: ' + (data.message || data.error));
-          } else if (wasRecording) {
-            // Recording stopped: show the recordings list
-            window.open('/files', 'recordings');
-          }
-          checkRecordingStatus();
-        })
-        .catch(err => alert('Failed to send recording command: ' + err));
-    }
-
-    let snapTimerId = null;
-    let snapWin = null;
-
-    function takeSnapshot() {
-      if (snapTimerId) {
-        clearInterval(snapTimerId);
-        snapTimerId = null;
-        snapWin = null;
-        resetSnapButton();
-        return;
-      }
-      const input = getElById('timerInput');
-      const secs = input ? Math.floor(parseFloat(input.value) || 0) : 0;
-      if (secs > 0) {
-        try { localStorage.setItem('snapTimerSecs', String(secs)); } catch (_) {}
-        let remaining = secs;
-        const btn = getElById('snapBtn');
-        btn.textContent = `⏱️ ${remaining}s`;
-        btn.style.background = '#d32f2f';
-        btn.style.borderColor = '#b71c1c';
-        snapWin = window.open('', '_blank');
-        snapTimerId = setInterval(() => {
-          remaining--;
-          if (remaining <= 0) {
-            clearInterval(snapTimerId);
-            snapTimerId = null;
-            if (snapWin) {
-              try { snapWin.location.href = '/video/snapshot'; } catch (_) { window.open('/video/snapshot', '_blank'); }
-              snapWin = null;
-            } else {
-              window.open('/video/snapshot', '_blank');
-            }
-            resetSnapButton();
-          } else {
-            btn.textContent = `⏱️ ${remaining}s`;
-          }
-        }, 1000);
+      if (data.batteryPercent !== undefined && data.batteryPercent >= 0) {
+        battEl.textContent = `🔋 ${data.batteryPercent}%`;
+        battEl.style.display = 'flex';
       } else {
-        window.open('/video/snapshot', '_blank');
+        battEl.style.display = 'none';
       }
+      overlay.style.display = 'flex';
     }
 
-    function resetSnapButton() {
-      const btn = getElById('snapBtn');
-      btn.textContent = '📸 Take Snapshot';
-      btn.style.background = '';
-      btn.style.borderColor = '';
-    }
+    window.addEventListener('resize', () => {
+      applyCanvasSize(targetCanvasSize(lastDrawnBmp));
+    });
 
-    (function initTimerInput() {
-      const input = getElById('timerInput');
-      if (!input) return;
-      try {
-        const saved = parseInt(localStorage.getItem('snapTimerSecs'), 10);
-        if (isFinite(saved) && saved >= 0) input.value = saved;
-      } catch (_) {}
-      input.addEventListener('input', () => {
-        const v = Math.floor(parseFloat(input.value) || 0);
-        if (v >= 0) {
-          try { localStorage.setItem('snapTimerSecs', String(v)); } catch (_) {}
-        }
-      });
-      input.addEventListener('click', (e) => e.stopPropagation());
-    })();
-
-    setInterval(checkRecordingStatus, 3000);
-    checkRecordingStatus();
-
-    // ---- Push-to-talk: stream the browser microphone to the phone's speaker ----
-    let pttActive = false;
-    let pttStream = null;
-    let pttCtx = null;
-    let pttSource = null;
-    let pttProcessor = null;
-    let pttGain = null;
-    let pttPointerId = null;
-    let pttQueue = [];
-    let pttQueueBytes = 0;
-    const PTT_BUCKET = 44100;
-
-    function updatePttUi(active) {
-      const btn = getElById('pttBtn');
-      if (!btn) return;
-      btn.classList.toggle('ptt-active', active);
-      btn.textContent = active ? '🔴 Recording...' : '🎙️ Hold to Talk';
-    }
-
-    function startTalk() {
-      if (pttActive) return;
-      if (!window.isSecureContext) {
-        return;
-      }
-      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-        return;
-      }
-      let ctx;
-      try {
-        ctx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 44100 });
-      } catch (_) {
-        return;
-      }
-      pttCtx = ctx;
-      if (ctx.state === 'suspended') ctx.resume().catch(() => { });
-      const constraints = {
-        audio: {
-          channelCount: 1,
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true
-        }
-      };
-      navigator.mediaDevices.getUserMedia(constraints)
-        .then(stream => {
-          pttStream = stream;
-          pttActive = true;
-          updatePttUi(true);
-          try {
-            const source = ctx.createMediaStreamSource(stream);
-            pttSource = source;
-            const processor = ctx.createScriptProcessor(4096, 1, 1);
-            pttProcessor = processor;
-            const gain = ctx.createGain();
-            gain.gain.value = 0;
-            pttGain = gain;
-            pttQueue = [];
-            pttQueueBytes = 0;
-            processor.onaudioprocess = (e) => {
-              const input = e.inputBuffer.getChannelData(0);
-              const view = new DataView(new ArrayBuffer(input.length * 2));
-              for (let i = 0; i < input.length; i++) {
-                const s = Math.max(-1, Math.min(1, input[i]));
-                view.setInt16(i * 2, (s < 0 ? s * 0x8000 : s * 0x7FFF), true);
-              }
-              pttQueue.push(new Uint8Array(view.buffer));
-              pttQueueBytes += input.length * 2;
-            };
-            talkSenderLoop();
-            source.connect(processor);
-            processor.connect(gain);
-            gain.connect(ctx.destination);
-            if (ctx.state === 'suspended') ctx.resume().catch(() => { });
-          } catch (err) {
-            stopTalk();
-          }
-        })
-        .catch(err => {
-          try { ctx.close(); } catch (_) { }
-          pttCtx = null;
-          updatePttUi(false);
-        });
-    }
-
-    function stopTalk() {
-      if (!pttActive) return;
-      pttActive = false;
-      if (pttProcessor) {
-        try { pttProcessor.disconnect(); } catch (_) { }
-        pttProcessor.onaudioprocess = null;
-        pttProcessor = null;
-      }
-      if (pttSource) { try { pttSource.disconnect(); } catch (_) { } pttSource = null; }
-      if (pttGain) { try { pttGain.disconnect(); } catch (_) { } pttGain = null; }
-      if (pttStream) {
-        pttStream.getTracks().forEach(t => { try { t.stop(); } catch (_) { } });
-        pttStream = null;
-      }
-      if (pttCtx) { try { pttCtx.close(); } catch (_) { } pttCtx = null; }
-      updatePttUi(false);
-    }
-
-    function takeFromQueue(n) {
-      const out = new Uint8Array(n);
-      let off = 0;
-      while (off < n) {
-        const head = pttQueue[0];
-        const take = Math.min(head.length, n - off);
-        out.set(head.subarray(0, take), off);
-        off += take;
-        if (take === head.length) pttQueue.shift();
-        else pttQueue[0] = head.subarray(take);
-      }
-      pttQueueBytes -= n;
-      return out;
-    }
-
-    async function sendPacket(packet) {
-      try {
-        const res = await fetch('/audio/upload', {
-          method: 'POST',
-          body: packet,
-          credentials: 'include'
-        });
-        return res.ok;
-      } catch (_) {
-        return false;
-      }
-    }
-
-    // Chrome rejects fetch streaming uploads over HTTP/1.x (it demands H2/QUIC), so
-    // instead of a ReadableStream body we send fixed-size PCM packets with a
-    // Content-Length. The server plays each packet and replies, which paces this loop.
-    async function talkSenderLoop() {
-      while (pttActive) {
-        if (pttQueueBytes >= PTT_BUCKET) {
-          const packet = takeFromQueue(PTT_BUCKET);
-          if (!await sendPacket(packet)) return;
-        } else {
-          await new Promise(r => setTimeout(r, 30));
-        }
-      }
-      if (pttQueueBytes > 0) {
-        const packet = takeFromQueue(pttQueueBytes);
-        await sendPacket(packet);
-      }
-    }
-
-    const pttBtn = getElById('pttBtn');
-    if (pttBtn) {
-      pttBtn.addEventListener('pointerdown', (e) => {
-        pttPointerId = e.pointerId;
-        try { pttBtn.setPointerCapture(e.pointerId); } catch (_) { }
-        e.preventDefault();
-        startTalk();
-      });
-      const endTalk = (e) => {
-        if (e.pointerId !== undefined && e.pointerId !== pttPointerId) return;
-        pttPointerId = null;
-        stopTalk();
-      };
-      pttBtn.addEventListener('pointerup', endTalk);
-      pttBtn.addEventListener('pointercancel', endTalk);
-      pttBtn.addEventListener('lostpointercapture', () => {
-        pttPointerId = null;
-        stopTalk();
-      });
-      // Space/Enter for keyboard accessibility
-      pttBtn.addEventListener('keydown', (e) => {
-        if ((e.key === ' ' || e.key === 'Enter') && !pttActive) {
-          e.preventDefault();
-          startTalk();
-        }
-      });
-      pttBtn.addEventListener('keyup', (e) => {
-        if ((e.key === ' ' || e.key === 'Enter') && pttActive) {
-          e.preventDefault();
-          stopTalk();
-        }
-      });
-    }
+    // Initialize
+    updateStreamUrlDisplay();
+    applyPreviewState();
+    loadDeviceInfo(true);
+    setInterval(() => loadDeviceInfo(false), 15000);
   </script>
 </body>
-
 </html>

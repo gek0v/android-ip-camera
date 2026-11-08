@@ -1,0 +1,11 @@
+v0.17.0
+
+- Completely removed H.264, RTSP, ONVIF, and legacy recording pipelines.
+- Focused the entire app on ultra-low-latency MJPEG streaming with maximum image fidelity.
+- Added configurable bitrate targets/limits (Unlimited, 20 Mbps, 12 Mbps, 8 Mbps, 4 Mbps, 2 Mbps, 1 Mbps).
+- Added customizable JPEG compression quality slider (20% - 98%).
+- Added comprehensive camera focus options: Continuous AF, Single AF/Trigger, Fixed/Infinity, Macro, and manual focus distance slider.
+- Added interactive Tap-to-Focus on the web live stream canvas.
+- Complete redesign of the web interface with modern responsive dark mode.
+- Added toggle to hide stream preview in the web UI for reduced network and CPU load.
+- Added dedicated quick-copy button and direct link for the MJPEG stream.

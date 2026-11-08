@@ -8,43 +8,49 @@
         <item>1.3</item>
         <item>1.2</item>
     </string-array>
-    <string-array name="rtsp_sub_size_entries">
-        <item>240p</item>
-        <item>360p</item>
-        <item>480p</item>
-        <item>720p</item>
+    <string-array name="stream_quality_entries">
+        <item>Ultra Quality (95%)</item>
+        <item>High Quality (85%)</item>
+        <item>Medium Quality (75%)</item>
+        <item>Low Latency (65%)</item>
+        <item>Ultra Low Latency (50%)</item>
     </string-array>
-    <string-array name="rtsp_sub_size_values">
-        <item>240</item>
-        <item>360</item>
-        <item>480</item>
-        <item>720</item>
+    <string-array name="stream_quality_values">
+        <item>95</item>
+        <item>85</item>
+        <item>75</item>
+        <item>65</item>
+        <item>50</item>
     </string-array>
-    <string-array name="rtsp_sub_bitrate_entries">
-        <item>300 kbps</item>
-        <item>500 kbps</item>
-        <item>800 kbps</item>
-        <item>1200 kbps</item>
-        <item>2000 kbps</item>
+    <string-array name="stream_bitrate_entries">
+        <item>Unlimited (Max Quality)</item>
+        <item>20 Mbps (Extreme)</item>
+        <item>12 Mbps (Very High)</item>
+        <item>8 Mbps (High)</item>
+        <item>4 Mbps (Balanced)</item>
+        <item>2 Mbps (Low Latency)</item>
+        <item>1 Mbps (Constrained Network)</item>
     </string-array>
-    <string-array name="rtsp_sub_bitrate_values">
-        <item>300</item>
-        <item>500</item>
-        <item>800</item>
-        <item>1200</item>
+    <string-array name="stream_bitrate_values">
+        <item>0</item>
+        <item>20000</item>
+        <item>12000</item>
+        <item>8000</item>
+        <item>4000</item>
         <item>2000</item>
+        <item>1000</item>
     </string-array>
-    <string-array name="rtsp_sub_fps_entries">
-        <item>10 fps</item>
-        <item>15 fps</item>
-        <item>20 fps</item>
-        <item>30 fps</item>
+    <string-array name="focus_mode_entries">
+        <item>Continuous Auto Focus</item>
+        <item>Auto (Trigger / Tap)</item>
+        <item>Fixed / Infinity</item>
+        <item>Macro / Close</item>
     </string-array>
-    <string-array name="rtsp_sub_fps_values">
-        <item>10</item>
-        <item>15</item>
-        <item>20</item>
-        <item>30</item>
+    <string-array name="focus_mode_values">
+        <item>continuous</item>
+        <item>auto</item>
+        <item>infinity</item>
+        <item>macro</item>
     </string-array>
     <string name="streaming_active">🔴 Streaming active</string>
 </resources>

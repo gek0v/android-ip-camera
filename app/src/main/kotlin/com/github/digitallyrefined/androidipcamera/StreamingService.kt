@@ -14,6 +14,7 @@ import android.content.pm.ServiceInfo
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Matrix
+import android.graphics.SurfaceTexture
 import android.hardware.Camera
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraManager
@@ -46,71 +47,38 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 
-/** (success, httpStatusLine, jsonBody) */
-private typealias RecordingResponse = Triple<Boolean, String, String>
-
 /**
- * Two backends behind CaptureBackend, auto-picked by hardware level (override via api pref):
- *   CameraX (global default) — ImageAnalysis YUV -> encoder + ImageCapture full-res stills.
- *   Camera1 (LEGACY HALs)    — preview -> GL pipe -> surface encoder; true 1920×1080 + video snapshot.
- * Full-res still from the live camera is concurrent; the other camera is captured by switching and
- * back (single HAL → one camera open at a time). Resolution is user-selectable.
+ * Ultra-low-latency MJPEG Streaming Service.
+ * Supports CameraX (default modern backend) and Camera1 (legacy hardware fallback),
+ * full resolution still snapshots on demand, and immediate MJPEG streaming.
  */
 @Suppress("DEPRECATION")
 class StreamingService : LifecycleService() {
 
     private val binder = LocalBinder()
     var streamingServerHelper: StreamingServerHelper? = null
-    /** Optional RTSP server (Settings > RTSP Stream) sharing the H.264 encoder with the HTTP server. */
-    private var rtspServer: RtspServer? = null
-    /** Optional ONVIF service (Settings > ONVIF) advertising the RTSP stream and motion events. */
-    @Volatile private var onvifServer: OnvifServer? = null
-    private var multicastLock: android.net.wifi.WifiManager.MulticastLock? = null
+
     /** Motion detection over the capture frames already delivered to the streaming pipeline. */
     private var motionMonitor: MotionMonitor? = null
 
-    // Streaming encoders (initialized when server is created)
-    private var h264StreamingEncoder: H264StreamingEncoder? = null
+    // Streaming encoder (MJPEG)
     private var mjpegStreamingEncoder: MjpegStreamingEncoder? = null
     private val encoders: List<StreamingEncoder>
-        get() = listOfNotNull(h264StreamingEncoder, mjpegStreamingEncoder)
+        get() = listOfNotNull(mjpegStreamingEncoder)
 
-    /** Motion detection is on: the camera must keep delivering frames even with no viewer. */
     private fun motionEnabled(): Boolean = motionMonitor?.enabled == true
 
-    @Volatile private var glPipe: CameraGlPipe? = null          // Camera1 H.264 GL pipe
-    @Volatile private var cameraXGlPipe: CameraGlPipe? = null   // CameraX H.264 GL pipe
-    @Volatile private var backend: CaptureBackend? = null   // CameraXCapture (default) or Camera1Capture (legacy)
+    @Volatile private var backend: CaptureBackend? = null
     @Volatile private var captureRunning = false
-    /**
-     * True while the camera is open *only* to keep the torch lit. The camera is otherwise opened on
-     * demand, so without this the torch would die the moment the last viewer left — and a blanket
-     * "don't release while the torch is on" guard would leak a camera session that nothing closes.
-     */
     @Volatile private var cameraHeldForTorch = false
-    /** True while the torch is lit through [setDeviceTorch] (CameraManager.setTorchMode) rather
-     *  than the streaming camera's own session. Tracked so it can be released on shutdown — unlike
-     *  session-bound torch, a setTorchMode torch survives process death. */
     @Volatile private var deviceTorchOn = false
-    @Volatile private var localRecorder: LocalRecorder? = null
-    /** Smaller encoder feeding the RTSP sub stream (/live/sub) while it has viewers. */
-    @Volatile private var subEncoder: H264HardwareEncoder? = null
 
-    @Volatile private var frontFacing = false             // false = back camera (read across threads)
+    @Volatile private var frontFacing = false
     @Volatile private var selectedCameraId: String? = null
 
     private var currentSurfaceProvider: Preview.SurfaceProvider? = null
-
-    /** True while a /video/snapshot request is running; lets startCamera() know frames are needed
-     *  so a frame-less CameraX backend falls back to Camera1 before the capture attempt. */
     @Volatile private var snapshotInProgress = false
 
-    /** True while /record/start is bringing the H.264 encoder up with no viewers connected. Makes
-     *  startCamera() deliver frames and initialize the encoder so recording works without streaming.
-     *  Cleared once localRecorder takes over (or the start fails), so the no-viewer baseline returns. */
-    @Volatile private var recordingNeeded = false
-
-    /** Latest good full-res capture per camera ("front"/"back"), with the time it was taken. */
     private data class CachedSnapshot(val jpeg: ByteArray, val atMs: Long)
     private val snapCache = ConcurrentHashMap<String, CachedSnapshot>()
     private val snapLock = Any()
@@ -141,131 +109,106 @@ class StreamingService : LifecycleService() {
         private const val NOTIFICATION_ID = 1
         private const val CHANNEL_ID = "streaming_service_channel"
         private const val PREF_CAMERA_ID = "camera_id"
-        private const val PREF_ONVIF_NAME = "onvif_name"
-        private const val PREF_ONVIF_PORT = "onvif_port"
-        /** "on"/"off". Already surfaced by /info.json, which until now reported a value nobody wrote. */
         private const val PREF_CAMERA_TORCH = "camera_torch"
-        /** Hard cap for a single /video/snapshot pipeline run (switch + capture). */
         private const val SNAPSHOT_DEADLINE_MS = 12_000L
-        /** A cached capture older than this is treated as stale and never served. */
         private const val SNAPSHOT_CACHE_MAX_AGE_MS = 5_000L
-        /** "Match stream" only reuses a streamed frame that is at most this old. */
         private const val SNAPSHOT_STREAM_FRESH_MS = 3_000L
-        /** CameraX grace period for its first analysis frame; if none arrives the session never
-         *  configured and the service falls back to the Camera1 backend. */
         private const val CAMERAX_FRAME_GRACE_MS = 8_000L
         const val ACTION_STOP_SERVICE = "com.github.digitallyrefined.androidipcamera.STOP_SERVICE"
+        const val ACTION_START_SERVER = "com.github.digitallyrefined.androidipcamera.START_SERVER"
         const val ACTION_RESTART_NOTIFICATION = "com.github.digitallyrefined.androidipcamera.RESTART_NOTIFICATION"
         const val ACTION_RESTART_SERVER = "com.github.digitallyrefined.androidipcamera.RESTART_SERVER"
-        const val ACTION_START_SERVER = "com.github.digitallyrefined.androidipcamera.START_SERVER"
     }
 
-    inner class LocalBinder : Binder() { fun getService(): StreamingService = this@StreamingService }
-
-    override fun onBind(intent: Intent): IBinder { super.onBind(intent); return binder }
-
-    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        when (intent?.action) {
-            ACTION_STOP_SERVICE -> { handleStopService(); return START_NOT_STICKY }
-            ACTION_RESTART_NOTIFICATION -> startForegroundService()
-            ACTION_RESTART_SERVER -> restartServer()
-            // Cold start with no activity bound (e.g. from BootReceiver): the activity normally
-            // calls startStreamingServer() after binding, so start it here instead.
-            ACTION_START_SERVER -> startStreamingServer()
-        }
-        // A null intent means the system re-created this START_STICKY service after killing the
-        // process. Nothing starts the server in that path — no activity binds, and onCreate() only
-        // posts the notification — so the service comes back looking healthy (foreground
-        // notification, camera available) with nothing listening on the port. startStreamingServer()
-        // early-returns when the socket is already open, so this is safe to reach on any path.
-        if (intent == null) startStreamingServer()
-        return super.onStartCommand(intent, flags, startId)
+    inner class LocalBinder : Binder() {
+        fun getService(): StreamingService = this@StreamingService
     }
 
-    private fun handleStopService() {
-        sendBroadcast(Intent("com.github.digitallyrefined.androidipcamera.CLOSE_APP").setPackage(packageName))
-        stopForeground(true); stopSelf()
-    }
-
-    private fun restartServer() {
-        lifecycleScope.launch(Dispatchers.IO) {
-            streamingServerHelper?.stopServer()
-            rtspServer?.stop()
-            stopOnvif()
-            kotlinx.coroutines.delay(500)
-            streamingServerHelper?.startStreamingServer()
-            startRtspServerIfEnabled()
-            startOnvifIfEnabled()
-        }
+    override fun onBind(intent: Intent): IBinder {
+        super.onBind(intent)
+        return binder
     }
 
     override fun onCreate() {
         super.onCreate()
+        createNotificationChannel()
         startForegroundService()
-        val prefs = PreferenceManager.getDefaultSharedPreferences(this)
-        val savedCameraId = prefs.getString(PREF_CAMERA_ID, null)
-        if (savedCameraId != null) {
-            // resolveCamera maps "1:3" → the openable camera ID (e.g. "3") and correct facing
-            val resolved = resolveCamera(savedCameraId)
-            if (resolved != null) {
-                frontFacing = resolved.first
-                selectedCameraId = resolved.second
-            } else {
-                frontFacing = cameraIdMatchesFacing(savedCameraId, true) == true
-                selectedCameraId = savedCameraId.takeIf { cameraIdMatchesFacing(it, frontFacing) == true }
-            }
-        } else {
-            frontFacing = false
-            selectedCameraId = null
-        }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-            registerReceiver(notificationChannelReceiver,
-                IntentFilter(NotificationManager.ACTION_NOTIFICATION_CHANNEL_BLOCK_STATE_CHANGED))
-        } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            startNotificationChannelCheckFallback()
+            val filter = IntentFilter(NotificationManager.ACTION_NOTIFICATION_CHANNEL_BLOCK_STATE_CHANGED)
+            registerReceiver(notificationChannelReceiver, filter)
         }
+        startStreamingServer()
     }
 
-    private fun startNotificationChannelCheckFallback() {
-        lifecycleScope.launch(Dispatchers.Main) {
-            while (isActive) {
-                val channel = getSystemService(NotificationManager::class.java).getNotificationChannel(CHANNEL_ID)
-                if (channel != null && channel.importance == NotificationManager.IMPORTANCE_NONE) { handleStopService(); break }
-                kotlinx.coroutines.delay(5000)
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        super.onStartCommand(intent, flags, startId)
+        when (intent?.action) {
+            ACTION_STOP_SERVICE -> handleStopService()
+            ACTION_START_SERVER -> startStreamingServer()
+            ACTION_RESTART_NOTIFICATION -> startForegroundService()
+            ACTION_RESTART_SERVER -> {
+                Log.i(TAG, "Restarting server due to configuration change")
+                lifecycleScope.launch(Dispatchers.IO) {
+                    streamingServerHelper?.stopStreamingServer()
+                    launchMain {
+                        stopCamera()
+                        bridgeTorchAcrossIdle()
+                        startStreamingServer()
+                    }
+                }
+            }
+            "RESTART_STREAMING" -> {
+                lifecycleScope.launch(Dispatchers.IO) {
+                    streamingServerHelper?.stopStreamingServer()
+                    launchMain {
+                        stopCamera()
+                        bridgeTorchAcrossIdle()
+                        startStreamingServer()
+                    }
+                }
             }
         }
+        return START_STICKY
     }
 
     override fun onDestroy() {
         super.onDestroy()
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
             try { unregisterReceiver(notificationChannelReceiver) } catch (_: Exception) {}
-        safeStopRecording()
-        // The service is going away, so the torch has nothing left to keep the camera open for;
-        // clearing this first stops the guard in stopCamera() from leaking the session.
-        cameraHeldForTorch = false
-        stopCamera()
-        // A setTorchMode torch outlives the process — release it explicitly or the LED burns
-        // forever after the service is stopped.
+        }
+        torchVerifyJob?.cancel(); torchVerifyJob = null
+        pendingStartJob?.cancel(); pendingStartJob = null
         if (deviceTorchOn) setDeviceTorch(false)
-        // Plain thread: the lifecycle scope is already cancelled once the service is destroyed.
-        rtspServer?.let { server -> Thread { server.stop() }.start() }
-        motionMonitor?.detector?.reset()
-        stopOnvif()
-        lifecycleScope.launch(Dispatchers.IO) { streamingServerHelper?.stopStreamingServer() }
+        stopCamera()
+        lifecycleScope.launch(Dispatchers.IO) {
+            try { streamingServerHelper?.stopStreamingServer() } catch (e: Exception) { Log.e(TAG, "server stop: ${e.message}") }
+            streamingServerHelper = null
+        }
+    }
+
+    private fun handleStopService() {
+        stopForeground(true)
+        stopSelf()
+        sendBroadcast(Intent("com.github.digitallyrefined.androidipcamera.CLOSE_APP"))
+    }
+
+    private fun createNotificationChannel() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val channel = NotificationChannel(CHANNEL_ID, "Camera Streaming Service", NotificationManager.IMPORTANCE_LOW).apply {
+                description = "Keeps camera streaming active in background"
+                setShowBadge(false)
+            }
+            getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
+        }
     }
 
     private fun startForegroundService() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            getSystemService(NotificationManager::class.java)
-                .createNotificationChannel(NotificationChannel(CHANNEL_ID, "Streaming Service", NotificationManager.IMPORTANCE_LOW))
-        }
-        val contentPI = PendingIntent.getActivity(this, 0,
-            Intent(this, com.github.digitallyrefined.androidipcamera.activities.MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE)
-        val stopPI = PendingIntent.getService(this, 1,
-            Intent(this, StreamingService::class.java).setAction(ACTION_STOP_SERVICE), PendingIntent.FLAG_IMMUTABLE)
-        val restartPI = PendingIntent.getService(this, 2,
-            Intent(this, StreamingService::class.java).setAction(ACTION_RESTART_NOTIFICATION), PendingIntent.FLAG_IMMUTABLE)
+        val notificationIntent = packageManager.getLaunchIntentForPackage(packageName)
+        val contentPI = PendingIntent.getActivity(this, 0, notificationIntent, PendingIntent.FLAG_IMMUTABLE)
+        val stopIntent = Intent(this, StreamingService::class.java).apply { action = ACTION_STOP_SERVICE }
+        val stopPI = PendingIntent.getService(this, 1, stopIntent, PendingIntent.FLAG_IMMUTABLE)
+        val restartIntent = Intent(this, StreamingService::class.java).apply { action = ACTION_RESTART_NOTIFICATION }
+        val restartPI = PendingIntent.getService(this, 2, restartIntent, PendingIntent.FLAG_IMMUTABLE)
         val notification: Notification = NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("Android IP Camera Streaming")
             .setContentText("Camera server is running in background")
@@ -281,12 +224,8 @@ class StreamingService : LifecycleService() {
         else startForeground(NOTIFICATION_ID, notification)
     }
 
-    // MainActivity attaches PreviewView here; camera restarts when a surface is set while streaming.
     fun setPreviewSurface(surfaceProvider: Preview.SurfaceProvider?) {
         currentSurfaceProvider = surfaceProvider
-        // Recording owns the camera session: stopping or restarting the camera now would tear
-        // down the encoder and finalize the file, so leave the pipeline alone until it stops.
-        if (localRecorder?.isRecording == true) return
         val shouldRun = encoders.any { it.hasClients() } || currentSurfaceProvider != null || motionEnabled()
         if (shouldRun) {
             debouncedStartCamera()
@@ -297,8 +236,10 @@ class StreamingService : LifecycleService() {
             }
         }
     }
+
     fun isCameraRunning() = captureRunning
-    fun hasActiveClients() = encoders.any { it.hasClients() } || localRecorder?.isRecording == true || motionEnabled()
+    fun hasActiveClients() = encoders.any { it.hasClients() } || motionEnabled()
+
     fun switchCamera() {
         selectCamera(!frontFacing, null)
         PreferenceManager.getDefaultSharedPreferences(this).edit()
@@ -308,8 +249,6 @@ class StreamingService : LifecycleService() {
     }
 
     fun getLocalIpAddress(): String {
-        // A server limited to one interface should advertise that address, not whichever IPv4
-        // address happens to be enumerated first.
         ListenInterface.specificIpv4(this)?.let { return it }
         try {
             NetworkInterface.getNetworkInterfaces().toList().forEach { ni ->
@@ -320,8 +259,6 @@ class StreamingService : LifecycleService() {
         } catch (_: Exception) {}
         return "unknown"
     }
-
-    // ---------------- server lifecycle (TLS cert + on-demand camera) ----------------
 
     fun startStreamingServer() {
         try {
@@ -359,379 +296,92 @@ class StreamingService : LifecycleService() {
                 onClientDisconnected = { handleClientDisconnected() },
                 onControlCommand = { key, value, ts -> handleRemoteControl(key, value, ts) },
                 onSnapshot = { id -> snapshot(id) },
-                onRecordStart = { startRecording() },
-                onRecordStop = { stopRecording() },
-                onRecordStatus = { getRecordingStatus() },
-                // /control/stop must also drop RTSP viewers, which the HTTP server does not own.
-                onStreamingEnabledChanged = { enabled -> if (!enabled) rtspServer?.disconnectAll() }
+                onStreamingEnabledChanged = { enabled ->
+                    if (!enabled) streamingServerHelper?.closeClientConnection()
+                }
             )
-            // Initialize encoders with the streaming server helper
-            h264StreamingEncoder = H264StreamingEncoder(this, streamingServerHelper!!) { Log.i(TAG, "H264: $it"); onLog?.invoke(it) }
             mjpegStreamingEncoder = MjpegStreamingEncoder(this, streamingServerHelper!!) { Log.i(TAG, "MJPEG: $it"); onLog?.invoke(it) }
             motionMonitor = MotionMonitor(this) { active ->
                 Log.i(TAG, "Motion ${if (active) "started" else "ended"}")
-                onvifServer?.setMotion(active)
             }
-            rtspServer = RtspServer(
-                AndroidRtspHost(
-                    this,
-                    onLog = { Log.i(TAG, "RTSP: $it"); onLog?.invoke(it) },
-                    clientConnected = { handleClientConnected() },
-                    clientDisconnected = { handleClientDisconnected() },
-                    keyFrameRequest = { stream ->
-                        val sub = subEncoder
-                        if (stream == RtspStream.SUB && sub != null) sub.requestKeyFrame()
-                        else h264StreamingEncoder?.h264HardwareEncoder?.requestKeyFrame()
-                    },
-                    streamingEnabled = { streamingServerHelper?.isStreamingEnabled() != false }
-                ),
-                DeviceMemoryHelper.rtspSendQueueCapacity(this),
-                // Same certificate as the web server; null when TLS is disabled.
-                tls = { TlsHelper.serverConfig(this) }
-            )
-            h264StreamingEncoder?.rtspServer = rtspServer
         }
         streamingServerHelper?.startStreamingServer()
-        startRtspServerIfEnabled()
-        startOnvifIfEnabled()
-        // Motion detection persisted as on keeps the camera running with no viewer.
         if (motionEnabled()) launchMain { startCameraIfNeeded() }
     }
 
-    /** Starts (or stops) the RTSP server to match the RTSP/ONVIF setting. ONVIF is enabled by the
-     *  same preference and advertises this stream. */
-    private fun startRtspServerIfEnabled() {
-        val prefs = PreferenceManager.getDefaultSharedPreferences(this)
-        val enabled = prefs.getBoolean(RtspServer.PREF_ENABLED, false)
-        if (enabled) rtspServer?.start() else rtspServer?.stop()
+    private fun generateRandomPassword(): String {
+        val chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
+        val rnd = SecureRandom()
+        return (1..16).map { chars[rnd.nextInt(chars.length)] }.joinToString("")
     }
 
-    // ---------------- ONVIF ----------------
-
-    private fun stopOnvif() {
-        try { onvifServer?.stop() } catch (e: Exception) { Log.w(TAG, "onvif stop: ${e.message}") }
-        onvifServer = null
-        try { multicastLock?.takeIf { it.isHeld }?.release() } catch (_: Exception) {}
-        multicastLock = null
-    }
-
-    /** Starts the ONVIF service when RTSP/ONVIF is enabled. It never keeps the camera open by
-     *  itself: video viewers (RTSP/HTTP) and motion detection do that on demand. */
-    private fun startOnvifIfEnabled() {
-        val prefs = PreferenceManager.getDefaultSharedPreferences(this)
-        if (!prefs.getBoolean(RtspServer.PREF_ENABLED, false)) {
-            stopOnvif()
-            return
-        }
-        if (onvifServer != null) return
-        val rtspPort = prefPort(RtspServer.PREF_PORT, RtspServer.DEFAULT_PORT)
-        val version = try { packageManager.getPackageInfo(packageName, 0).versionName ?: "" } catch (_: Exception) { "" }
-        val onvif = OnvifServer(
-            port = prefPort(PREF_ONVIF_PORT, 8000),
-            host = { getLocalIpAddress() },
-            info = {
-                OnvifDeviceInfo(
-                    manufacturer = Build.MANUFACTURER.replaceFirstChar { it.uppercase() },
-                    model = Build.MODEL,
-                    firmware = "AndroidIPCamera $version",
-                    serial = deviceId(),
-                    hardwareId = Build.DEVICE,
-                    mac = pseudoMac(),
-                    name = prefs.getString(PREF_ONVIF_NAME, null)?.takeIf { it.isNotBlank() } ?: Build.MODEL,
-                )
-            },
-            stream = {
-                val size = desiredSize()
-                val fps = (prefs.getString("stream_fps", "30")?.toIntOrNull() ?: 30).coerceIn(1, 60)
-                val scheme = if (TlsHelper.isEnabled(this)) "rtsps" else "rtsp"
-                OnvifStreamInfo(
-                    rtspUrl = "$scheme://${getLocalIpAddress()}:$rtspPort${RtspServer.PATH}",
-                    width = size.width, height = size.height, fps = fps,
-                    bitrateKbps = H264HardwareEncoder.bitrateFor(size.width, size.height) / 1000,
-                )
-            },
-            credentials = { streamCredentials() },
-            // Snapshots use the regular still-capture path, so they work whether or not a
-            // stream is running (a snapshot opens the camera on demand and restores the stream).
-            snapshot = { snapshot(camId()) },
-            onLog = { Log.i(TAG, "ONVIF: $it"); onLog?.invoke("ONVIF: $it") },
-            // Same certificate as the web server; null when TLS is disabled.
-            tls = { TlsHelper.serverConfig(this) },
-            bindAddress = ListenInterface.resolve(this)
-        )
-        try {
-            multicastLock = (applicationContext.getSystemService(Context.WIFI_SERVICE) as android.net.wifi.WifiManager)
-                .createMulticastLock("onvif-discovery").apply { setReferenceCounted(false); acquire() }
-        } catch (e: Exception) { Log.w(TAG, "multicast lock: ${e.message}") }
-        lifecycleScope.launch(Dispatchers.IO) {
-            try {
-                onvif.start()
-                // Settings may have changed while the service was binding.
-                if (!PreferenceManager.getDefaultSharedPreferences(this@StreamingService)
-                        .getBoolean(RtspServer.PREF_ENABLED, false)) {
-                    onvif.stop()
-                    return@launch
-                }
-                onvifServer = onvif
-                motionMonitor?.detector?.let { if (it.active) onvif.setMotion(true) }
-            } catch (e: Exception) {
-                Log.e(TAG, "ONVIF start failed", e)
-                onLog?.invoke("ONVIF failed to start: ${e.message}")
-                try { multicastLock?.takeIf { it.isHeld }?.release() } catch (_: Exception) {}
-                multicastLock = null
-            }
-        }
-    }
-
-    private fun streamCredentials(): Pair<String, String>? {
-        val prefs = PreferenceManager.getDefaultSharedPreferences(this)
-        if (!prefs.getBoolean("enable_auth", true)) return null
-        val ss = SecureStorage(this)
-        val u = InputValidator.validateAndSanitizeUsername(ss.getSecureString(SecureStorage.KEY_USERNAME, "") ?: "")
-        val p = InputValidator.validateAndSanitizePassword(ss.getSecureString(SecureStorage.KEY_PASSWORD, "") ?: "")
-        return if (u.isNullOrBlank() || p.isNullOrBlank()) null else u to p
-    }
-
-    private fun prefPort(key: String, def: Int): Int =
-        PreferenceManager.getDefaultSharedPreferences(this).getString(key, null)?.toIntOrNull()?.takeIf { it in 1..65535 } ?: def
-
-    /** Stable pseudo-MAC/serial from ANDROID_ID (Android hides the real Wi-Fi MAC from apps). */
-    private fun deviceId(): String =
-        android.provider.Settings.Secure.getString(contentResolver, android.provider.Settings.Secure.ANDROID_ID) ?: "0000000000000000"
-
-    private fun pseudoMac(): String {
-        val h = java.security.MessageDigest.getInstance("SHA-256").digest(deviceId().toByteArray())
-        h[0] = ((h[0].toInt() and 0xFC) or 0x02).toByte()   // locally administered, unicast
-        return (0 until 6).joinToString(":") { String.format(Locale.US, "%02x", h[it]) }
-    }
-
-    /** A viewer (HTTP or RTSP) connected: make sure the camera runs in a configuration that serves it. */
     private fun handleClientConnected() {
-        launchMain {
-            onClientConnected?.invoke()
-            // While recording, the camera is already running and feeding the encoder; a
-            // restart would finalize the recording, and new viewers pick up the existing
-            // stream, so no reconfiguration is needed (the sub stream encoder needs no restart).
-            if (localRecorder?.isRecording == true) {
-                updateSubStream()
-                return@launchMain
-            }
-            if (captureRunning) {
-                debouncedStartCamera()
-            } else {
-                startCameraIfNeeded()
-            }
-        }
+        onClientConnected?.invoke()
+        launchMain { startCameraIfNeeded() }
     }
 
     private fun handleClientDisconnected() {
+        onClientDisconnected?.invoke()
         launchMain {
-            onClientDisconnected?.invoke()
-            // Recording owns the camera: stopping or restarting it now would finalize
-            // the file, and remaining viewers keep their existing stream as-is.
-            if (localRecorder?.isRecording == true) {
-                updateSubStream()
-                return@launchMain
-            }
-            if (!hasActiveClients()) {
-                // Reload/idle: keep the LED lit across the session gap before the
-                // shed-restart tears the streaming camera down.
+            if (!hasActiveClients() && currentSurfaceProvider == null) {
+                stopCamera()
                 bridgeTorchAcrossIdle()
-                if (currentSurfaceProvider == null) {
-                    // Last client gone and no on-screen preview: shed the H.264
-                    // surface encoder / GL pipe and keep the camera warm in a plain,
-                    // snapshot-friendly configuration. Force ignores the hasClients()
-                    // bypass so the reconfiguration actually happens.
-                    pendingStartJob?.cancel()
-                    pendingStartJob = lifecycleScope.launch(Dispatchers.Main) {
-                        kotlinx.coroutines.delay(300)
-                        if (!captureRunning) return@launch   // camera stopped meanwhile
-                        if (encoders.any { it.hasClients() } || currentSurfaceProvider != null || motionEnabled()) return@launch
-                        startCamera(force = true)
-                    }
-                } else {
-                    debouncedStartCamera()
-                }
-            } else if (captureRunning) {
-                debouncedStartCamera()
             }
         }
     }
 
-    private fun launchMain(block: suspend () -> Unit) { lifecycleScope.launch(Dispatchers.Main) { block() } }
-
-    // ---------------- camera ----------------
-
-    private fun allPermissionsGranted() =
-        ContextCompat.checkSelfPermission(baseContext, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
-
-    private fun camId(): String = selectedCameraId ?: if (frontFacing) "front" else "back"
-
-    private data class CameraToken(val logicalId: String, val physicalId: String?)
-
-    private fun parseCameraToken(cameraId: String): CameraToken {
-        val logicalId = cameraId.substringBefore(':')
-        val physicalId = cameraId.substringAfter(':', "").takeIf { it.isNotBlank() }
-        return CameraToken(logicalId, physicalId)
-    }
-
-    private fun cameraIdMatchesFacing(cameraId: String, front: Boolean): Boolean? = try {
-        val cm = getSystemService(Context.CAMERA_SERVICE) as CameraManager
-        val token = parseCameraToken(cameraId)
-
-        // If the logical ID is not in the camera list, it might be a physical ID
-        // Try to find which logical camera it belongs to
-        val actualLogicalId = if (cm.cameraIdList.contains(token.logicalId)) {
-            token.logicalId
-        } else {
-            // Search for the logical camera that has this physical ID
-            cm.cameraIdList.firstOrNull { logicalId ->
-                try {
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-                        cm.getCameraCharacteristics(logicalId).physicalCameraIds.contains(token.logicalId)
-                    } else false
-                } catch (_: Throwable) { false }
-            } ?: token.logicalId
-        }
-
-        if (!cm.cameraIdList.contains(actualLogicalId)) {
-            null
-        } else {
-            val want = if (front) CameraCharacteristics.LENS_FACING_FRONT else CameraCharacteristics.LENS_FACING_BACK
-            val ch = cm.getCameraCharacteristics(actualLogicalId)
-            val actualPhysicalId = if (token.physicalId != null) {
-                token.physicalId
-            } else if (actualLogicalId != token.logicalId) {
-                // The original value was a physical ID, use it as the physical ID
-                token.logicalId
-            } else {
-                null
-            }
-            // On older devices, physical IDs might be valid camera IDs themselves
-            val hasPhysicalCameraIds = Build.VERSION.SDK_INT >= Build.VERSION_CODES.P &&
-                ch.physicalCameraIds.contains(actualPhysicalId)
-            val physicalMatches = actualPhysicalId == null ||
-                hasPhysicalCameraIds ||
-                cm.cameraIdList.contains(actualPhysicalId)
-            physicalMatches && ch.get(CameraCharacteristics.LENS_FACING) == want
-        }
-    } catch (_: Throwable) {
-        null
-    }
-
-    private fun firstCameraIdForFacing(front: Boolean): String? = try {
-        val cm = getSystemService(Context.CAMERA_SERVICE) as CameraManager
-        val want = if (front) CameraCharacteristics.LENS_FACING_FRONT else CameraCharacteristics.LENS_FACING_BACK
-        cm.cameraIdList.firstOrNull { cm.getCameraCharacteristics(it).get(CameraCharacteristics.LENS_FACING) == want }
-    } catch (_: Exception) {
-        null
-    }
-
-    private fun selectCamera(front: Boolean, cameraId: String?) {
-        frontFacing = front
-        selectedCameraId = cameraId
-            ?.takeIf { cameraIdMatchesFacing(it, front) == true }
-            ?: selectedCameraId?.takeIf { cameraIdMatchesFacing(it, front) == true }
-            ?: firstCameraIdForFacing(front)
-    }
-
-    private fun camera1IndexForFacing(front: Boolean): Int {
-        val want = if (front) Camera.CameraInfo.CAMERA_FACING_FRONT else Camera.CameraInfo.CAMERA_FACING_BACK
-        val info = Camera.CameraInfo()
-        for (i in 0 until Camera.getNumberOfCameras()) { Camera.getCameraInfo(i, info); if (info.facing == want) return i }
-        return 0
-    }
-
-    private fun camera1IndexForSelectedOrFacing(front: Boolean): Int {
-        val selected = selectedCameraId?.toIntOrNull()
-        return if (selected != null && selected in 0 until Camera.getNumberOfCameras()) {
-            selected
-        } else {
-            camera1IndexForFacing(front)
+    private fun launchMain(block: suspend () -> Unit) {
+        lifecycleScope.launch(Dispatchers.Main) {
+            if (isActive) block()
         }
     }
 
-    /** Is the current camera a LEGACY Camera2 HAL? (CameraX caps low there → use Camera1 for 1080p.) */
-    private fun isLegacy(): Boolean = try {
-        val cm = getSystemService(Context.CAMERA_SERVICE) as CameraManager
-        val want = if (frontFacing) CameraCharacteristics.LENS_FACING_FRONT else CameraCharacteristics.LENS_FACING_BACK
-        val id = selectedCameraId
-            ?.let { parseCameraToken(it).logicalId }
-            ?.takeIf { it in cm.cameraIdList }
-            ?: cm.cameraIdList.firstOrNull { cameraId ->
-                try {
-                    cm.getCameraCharacteristics(cameraId).get(CameraCharacteristics.LENS_FACING) == want
-                } catch (_: Exception) {
-                    false
-                }
-            }
-            ?: cm.cameraIdList.first()
-        cm.getCameraCharacteristics(id).get(CameraCharacteristics.INFO_SUPPORTED_HARDWARE_LEVEL) ==
-            CameraCharacteristics.INFO_SUPPORTED_HARDWARE_LEVEL_LEGACY
-    } catch (e: Exception) {
-        Log.w(TAG, "isLegacy check failed, defaulting to false (camerax)", e)
-        false
+    private fun allPermissionsGranted(): Boolean {
+        val baseGranted = ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
+        val postNotificationsGranted = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
+        } else true
+        return baseGranted && postNotificationsGranted
     }
 
-    private fun cameraHardwareLevel(cameraId: String?): Int? = try {
-        val cm = getSystemService(Context.CAMERA_SERVICE) as CameraManager
-        val want = if (frontFacing) CameraCharacteristics.LENS_FACING_FRONT else CameraCharacteristics.LENS_FACING_BACK
-        val id = cameraId
-            ?.let { parseCameraToken(it).logicalId }
-            ?.takeIf { it in cm.cameraIdList }
-            ?: cm.cameraIdList.firstOrNull { cm.getCameraCharacteristics(it).get(CameraCharacteristics.LENS_FACING) == want }
-            ?: cm.cameraIdList.firstOrNull()
-        id?.let { cm.getCameraCharacteristics(it).get(CameraCharacteristics.INFO_SUPPORTED_HARDWARE_LEVEL) }
-    } catch (_: Exception) { null }
-
-    /** Encoder frame for a surface path: [want] turned only by the manual rotate= control. */
-    private fun surfaceEncoderSize(want: Size): Size {
-        val (w, h) = CameraGlPipe.frameSize(want.width, want.height, quantizedRotation(readRotatePref()))
-        return Size(w, h)
-    }
-
-    private fun supportsSurfaceEncoder(): Boolean {
-        if (frontFacing) return false
-        val level = cameraHardwareLevel(selectedCameraId) ?: return false
-        return level == CameraCharacteristics.INFO_SUPPORTED_HARDWARE_LEVEL_FULL ||
-               level == CameraCharacteristics.INFO_SUPPORTED_HARDWARE_LEVEL_3
-    }
-
-    /** auto | camerax | camera1. auto → Camera1 on LEGACY HALs (true 1080p), CameraX everywhere else. */
     private fun chooseApi(): String =
         when (val pref = PreferenceManager.getDefaultSharedPreferences(this).getString("capture_api", "auto") ?: "auto") {
             "camerax", "camera1" -> pref
             else -> if (isLegacy()) "camera1" else "camerax"
         }
 
-    /** Desired stream size from the resolution pref; "auto" → 1080p target (the device gives its best ≤ that). */
+    private fun isLegacy(): Boolean =
+        cameraHardwareLevel(selectedCameraId) == CameraCharacteristics.INFO_SUPPORTED_HARDWARE_LEVEL_LEGACY
+
+    private fun cameraHardwareLevel(cameraId: String?): Int? = try {
+        val cm = getSystemService(Context.CAMERA_SERVICE) as CameraManager
+        val want = if (frontFacing) CameraCharacteristics.LENS_FACING_FRONT else CameraCharacteristics.LENS_FACING_BACK
+        val id = cameraId?.takeIf { it in cm.cameraIdList }
+            ?: cm.cameraIdList.firstOrNull { cm.getCameraCharacteristics(it).get(CameraCharacteristics.LENS_FACING) == want }
+            ?: cm.cameraIdList.firstOrNull()
+        id?.let { cm.getCameraCharacteristics(it).get(CameraCharacteristics.INFO_SUPPORTED_HARDWARE_LEVEL) }
+    } catch (_: Exception) { null }
+
     private fun desiredSize(): Size {
-        val caps = H264HardwareEncoder.caps()
         val prefs = PreferenceManager.getDefaultSharedPreferences(this)
         val streamRes = prefs.getString("stream_res", "auto") ?: "auto"
         if (streamRes == "auto") {
-            val quality = prefs.getString("camera_resolution", "low") ?: "low"
-            val target = when (quality) {
-                "high" -> Size(1280, 720)
-                "medium" -> Size(960, 720)
+            val quality = prefs.getString("camera_resolution", "high") ?: "high"
+            return when (quality) {
+                "high" -> Size(1920, 1080)
+                "medium" -> Size(1280, 720)
                 "low" -> Size(800, 600)
-                else -> Size(800, 600)
+                else -> Size(1280, 720)
             }
-            return Size(minOf(target.width, caps.maxW), minOf(target.height, caps.maxH))
         }
         val m = Regex("(\\d+)x(\\d+)").find(streamRes)
-        val w = m?.groupValues?.get(1)?.toIntOrNull() ?: 1920
-        val h = m?.groupValues?.get(2)?.toIntOrNull() ?: 1080
-        return Size(minOf(w, caps.maxW), minOf(h, caps.maxH))
+        val w = m?.groupValues?.get(1)?.toIntOrNull() ?: 1280
+        val h = m?.groupValues?.get(2)?.toIntOrNull() ?: 720
+        return Size(w, h)
     }
 
     private suspend fun startCameraIfNeeded() { if (!captureRunning) startCamera() }
 
-    /**
-     * Debounced camera restart. Coalesces rapid [startCamera] calls (e.g. when a settings
-     * change fires both a resolution and a camera-restart broadcast) into a single restart
-     * after [delayMs]. Immediate restarts (force=true) bypass the debounce.
-     */
     private fun debouncedStartCamera(force: Boolean = false, delayMs: Long = 300) {
         if (force) {
             pendingStartJob?.cancel()
@@ -757,22 +407,14 @@ class StreamingService : LifecycleService() {
             Log.i(TAG, "startCamera bypassed: no force, no clients, and preview surface is null")
             return@withLock
         }
-        // An explicit restart must always be able to tear down the current session — even one the
-        // torch is holding open. Otherwise the flag permanently neuters stopCamera(), the old
-        // backend leaks (its HAL device stays claimed), and on single-HAL devices every later
-        // camera open fails until process death. Restore the hold after a successful start.
+
         val resumeTorchHold = cameraHeldForTorch
         cameraHeldForTorch = false
         stopCamera()
-        h264StreamingEncoder?.awaitRelease()
+
         try {
             val want = desiredSize()
             val prefs = PreferenceManager.getDefaultSharedPreferences(this)
-            // If no camera id has been resolved yet (fresh process / the UI never sent a camera
-            // control), pin the facing-default to a real Camera2 id. Otherwise `camId()` falls back
-            // to "back"/"front" and every per-camera pref (rotate/zoom/exposure/...) is written and
-            // read under a placeholder key, while `/info.json` lensSettings looks them up by the real
-            // camera id — so on page refresh those values appear reset to defaults.
             if (selectedCameraId == null) {
                 firstCameraIdForFacing(frontFacing)?.let { resolved ->
                     selectedCameraId = resolved
@@ -780,190 +422,72 @@ class StreamingService : LifecycleService() {
                 }
             }
             val camxUnusable = prefs.getBoolean("camera2_unusable", false)
-            // The on-phone preview is only wired to CameraX, so the idle/preview-only state is
-            // ALWAYS CameraX — its Preview use case renders even on devices whose Camera2 session
-            // never configures ImageAnalysis/ImageCapture. The backend choice only matters when
-            // frames are actually needed (clients / recording / snapshot in flight): then honor the
-            // API preference and the known-bad-Camera2 flag, which route to the Camera1 backend.
-            val needsFrames = snapshotInProgress || recordingNeeded ||
-                encoders.any { it.hasClients() } || localRecorder?.isRecording == true || motionEnabled()
+            val needsFrames = snapshotInProgress || encoders.any { it.hasClients() } || motionEnabled()
             val useCamera1 = needsFrames && (chooseApi() == "camera1" || camxUnusable)
+
             if (useCamera1) {
-                if (camxUnusable) {
-                    Log.i(TAG, "Camera2 known unusable on this device and frames are needed — using Camera1 backend")
-                }
                 startCamera1Backend(want)
             } else {
                 startCameraXBackend(want)
-                // CameraX can bind without the session ever configuring (e.g. "Unable to configure
-                // camera ... TimeoutException") — no analysis frames ever arrive. Detect that and fall
-                // back to the Camera1 backend so streaming and snapshots keep working on such devices.
                 if (needsFrames && !waitForCameraXFrame()) {
-                    Log.w(TAG, "CameraX bound but no frames within ${CAMERAX_FRAME_GRACE_MS}ms — Camera2 session config failed on this device; falling back to Camera1")
+                    Log.w(TAG, "CameraX bound but no frames within ${CAMERAX_FRAME_GRACE_MS}ms — falling back to Camera1")
                     stopCamera()
-                    // Remember the device is Camera2-broken (not the API preference) so the CameraX
-                    // on-phone preview can come back once frames are no longer needed, while future
-                    // frame-needing starts go straight to Camera1 without another 8s wait.
                     prefs.edit().putBoolean("camera2_unusable", true).apply()
                     startCamera1Backend(want)
                 }
             }
-            // Persist the active camera id so encoders and helpers can read per-camera prefs
+
             try {
                 prefs.edit().putString(PREF_CAMERA_ID, camId()).apply()
             } catch (_: Exception) {}
 
             captureRunning = true
             encoders.forEach { it.start() }
-            updateSubStream()
-            // Still no viewers? The camera is open purely to keep the torch lit.
-            if (resumeTorchHold && !hasActiveClients() && currentSurfaceProvider == null) {
+
+            if (!hasActiveClients() && currentSurfaceProvider == null && resumeTorchHold) {
                 cameraHeldForTorch = true
             }
-            // enableTorch can silently lose the race with a settling HAL; confirm it stuck.
-            scheduleVerifyTorchRestored()
-            // Apply stored camera-level controls (exposure/zoom/focus) to the backend.
-            // CameraX binding is asynchronous; retry in a background coroutine until ready.
-            lifecycleScope.launch(Dispatchers.IO) {
-                var attempts = 0
-                while (attempts < 40) {
-                    val b = backend
-                    if (b == null) break
-                    try {
-                        if (b.ready) {
-                            launchMain { try { applyStored(b) } catch (_: Exception) {} }
-                            break
-                        }
-                    } catch (_: Exception) {}
-                    attempts++
-                    try { kotlinx.coroutines.delay(200) } catch (_: Exception) { break }
-                }
-            }
         } catch (e: Exception) {
-            Log.e(TAG, "startCamera failed", e)
+            Log.e(TAG, "startCamera: ${e.message}")
             stopCamera()
         }
     }
 
-    /** True once the CameraX backend has delivered an analysis frame (i.e. the session configured —
-     *  some HALs bind without ever configuring, which produces no frames at all). */
     private suspend fun waitForCameraXFrame(): Boolean {
-        val b = backend
-        if (b !is CameraXCapture) return true
-        var waited = 0L
-        while (!b.hasProducedFrame && waited < CAMERAX_FRAME_GRACE_MS) {
+        val cx = backend as? CameraXCapture ?: return true
+        val start = System.currentTimeMillis()
+        while (System.currentTimeMillis() - start < CAMERAX_FRAME_GRACE_MS) {
+            if (cx.hasProducedFrame) return true
             kotlinx.coroutines.delay(100)
-            waited += 100
         }
-        return b.hasProducedFrame
+        return cx.hasProducedFrame
     }
 
     private fun startCamera1Backend(want: Size) {
-        // Camera1 → GL pipe → surface encoder (true 1920×1080 on legacy HALs).
         val cap = Camera1Capture(camera1IndexForSelectedOrFacing(frontFacing), want.width, want.height)
-        val pipe = newPipe(Size(cap.chosenW, cap.chosenH))
-        cap.start(pipe.surfaceTexture)
-        val mjpeg = mjpegStreamingEncoder?.takeIf { it.hasClients() }
+        val dummyTexture = SurfaceTexture(0)
+        cap.start(dummyTexture)
+        val mjpeg = mjpegStreamingEncoder
         val motion = motionMonitor?.takeIf { it.enabled }
-        if (mjpeg != null || motion != null) {
-            cap.setPreviewFrameCallback { nv21 ->
-                mjpeg?.processNv21Frame(nv21, cap.chosenW, cap.chosenH)
-                motion?.processNv21Frame(nv21, cap.chosenW, cap.chosenH)
-            }
+        cap.setPreviewFrameCallback { nv21 ->
+            mjpeg?.processNv21Frame(nv21, cap.chosenW, cap.chosenH)
+            motion?.processNv21Frame(nv21, cap.chosenW, cap.chosenH)
         }
         backend = cap
+        applyStored(cap)
         Log.i(TAG, "stream ${camId()} api=camera1 ${cap.chosenW}x${cap.chosenH}")
     }
 
     private fun startCameraXBackend(want: Size) {
-        // CameraX → ImageAnalysis YUV → encoders + optional Preview on the phone.
-        val h264 = h264StreamingEncoder
-        var h264SurfaceProvider: Preview.SurfaceProvider? = null
-
-        if (h264 != null && (h264.hasClients() || recordingNeeded || localRecorder?.isRecording == true) && supportsSurfaceEncoder()) {
-            val prefs = PreferenceManager.getDefaultSharedPreferences(this)
-            val fps = prefs.getString("stream_fps", "30")?.toIntOrNull() ?: 30
-            val fpsCoerced = fps.coerceIn(1, 60)
-            fun newEncoder(size: Size) = H264HardwareEncoder(
-                size.width,
-                size.height,
-                fpsCoerced,
-                H264HardwareEncoder.bitrateFor(size.width, size.height),
-                true // useSurface = true
-            ) { d, k, pts -> h264.broadcastH264(d, k, pts) }
-
-            // Encode in the picture's shape (portrait when the camera image is upright portrait).
-            // If the encoder rejects the portrait size, fall back to the byte-buffer YUV path,
-            // which rotates in software — never to a landscape surface frame, which would make a
-            // 90°/270° stream look horizontal.
-            val frame = surfaceEncoderSize(want)
-            val enc = try {
-                newEncoder(frame)
-            } catch (e: Exception) {
-                if (frame == want) throw e
-                Log.w(TAG, "H.264 encoder rejected ${frame.width}x${frame.height}; falling back to software-rotated YUV: ${e.message}")
-                null
-            }
-
-            if (enc != null) {
-                h264.setEncoder(enc)
-                streamingServerHelper?.resetH264Wait()
-
-                // Route CameraX frames through a GL pipe so mirror can be applied
-                // without restarting the camera (the pipe reads mirror on each frame).
-                val pipe = CameraGlPipe(enc.inputSurface!!, enc.width, enc.height, fpsCoerced, standardBuffer = true).also {
-                    it.mirror = readMirrorPref()
-                    it.rotation = quantizedRotation(readRotatePref())
-                    it.start()
-                    cameraXGlPipe = it
-                }
-
-                h264SurfaceProvider = Preview.SurfaceProvider { request ->
-                    val surface = pipe.inputSurface
-                    if (surface != null && surface.isValid) {
-                        // Render at the resolution CameraX negotiated rather than the pipe's
-                        // placeholder buffer size, so the selected resolution is what gets captured.
-                        pipe.setCameraBufferSize(request.resolution.width, request.resolution.height)
-                        Log.i(TAG, "Providing CameraX H.264 surface via GL pipe (${request.resolution}, mirror=${pipe.mirror})")
-                        enc.hasSurfaceBeenProvided = true
-                        request.provideSurface(surface, ContextCompat.getMainExecutor(this)) { result ->
-                            Log.i(TAG, "CameraX H.264 surface released by CameraX (result code: ${result.resultCode})")
-                        }
-                    } else {
-                        request.willNotProvideSurface()
-                    }
-                }
-            } else {
-                h264.setEncoder(null)
-            }
-        } else if (h264 != null) {
-            // Fall back to YUV mode immediately (previous method)
-            h264.setEncoder(null)
-        }
-
         val showScreenPreview = !encoders.any { it.hasClients() } && currentSurfaceProvider != null
         backend = CameraXCapture(
             this, this, frontFacing, selectedCameraId, want,
-            if (showScreenPreview) currentSurfaceProvider else null,
-            h264SurfaceProvider,
-            onEncoderSurfaceFallback = {
-                Log.i(TAG, "CameraX SurfaceProvider fallback triggered: switching H.264 to software YUV mode")
-                h264?.setEncoder(null)
-            }
+            if (showScreenPreview) currentSurfaceProvider else null
         ) { img ->
             try {
-                // Motion detection reads the luma plane without disturbing the encoders' buffers.
                 motionMonitor?.processFrame(img)
-                cameraXGlPipe?.let { pipe ->
-                    pipe.frameWidth = img.width; pipe.frameHeight = img.height
-                }
-                val recording = localRecorder?.isRecording == true || recordingNeeded
-                val activeEncoders = encoders.filter { it.hasClients() }
-                if (recording && h264StreamingEncoder != null) {
-                    h264StreamingEncoder?.processFrame(img)
-                    activeEncoders.filter { it != h264StreamingEncoder }.forEach { it.processFrame(img) }
-                } else if (activeEncoders.isNotEmpty()) {
-                    activeEncoders.forEach { it.processFrame(img) }
+                if (mjpegStreamingEncoder?.hasClients() == true) {
+                    mjpegStreamingEncoder?.processFrame(img)
                 }
             } catch (e: OutOfMemoryError) {
                 Log.e(TAG, "ImageAnalysis OOM — dropping frame: ${e.message}")
@@ -973,98 +497,23 @@ class StreamingService : LifecycleService() {
                 img.close()
             }
         }.also { it.start() }
+        applyStored(backend!!)
         Log.i(TAG, "stream ${camId()} api=camerax")
     }
 
     private fun stopCamera() {
-        // Single choke point for every on-demand release path (last viewer left, preview hidden,
-        // stream reconfigured). The torch-off handler clears the flag before calling in, so it is
-        // the one caller that can still close a torch-held session.
         if (cameraHeldForTorch) return
-        safeStopRecording()
         cameraCloseStartTime = System.currentTimeMillis()
         backend?.stop(); backend = null
         val closeDuration = System.currentTimeMillis() - cameraCloseStartTime
         if (closeDuration > 1000) {
-            Log.w(TAG, "Camera close took ${closeDuration}ms — HAL is slow to release resources")
+            Log.w(TAG, "Camera close took ${closeDuration}ms")
         }
-        stopSubStream()   // detach it from the GL pipe while the pipe is still running
-        cameraXGlPipe?.stop(); cameraXGlPipe = null
-        glPipe?.stop(); glPipe = null
         encoders.forEach { it.stop() }
         motionMonitor?.reset()
         captureRunning = false
     }
 
-    // ---------------- RTSP sub stream ----------------
-
-    /**
-     * Runs the RTSP sub stream's own small encoder while a /live/sub viewer is connected and the
-     * H.264 picture goes through a GL pipe, which then draws every frame into it too. Without a
-     * pipe (byte-buffer capture: front camera, LIMITED devices) the sub stream carries the main
-     * encoder's frames instead.
-     */
-    private fun updateSubStream() {
-        val rtsp = rtspServer ?: return
-        val h264 = h264StreamingEncoder ?: return
-        val pipe = cameraXGlPipe ?: glPipe
-        if (pipe == null || !rtsp.hasSubVideoClients()) {
-            stopSubStream()
-            return
-        }
-        if (subEncoder != null) return
-        val prefs = PreferenceManager.getDefaultSharedPreferences(this)
-        val shortSide = prefs.getString(RtspServer.PREF_SUB_SIZE, null)?.toIntOrNull() ?: RtspServer.DEFAULT_SUB_SIZE
-        val fps = (prefs.getString(RtspServer.PREF_SUB_FPS, null)?.toIntOrNull() ?: RtspServer.DEFAULT_SUB_FPS).coerceIn(1, 60)
-        val kbps = prefs.getString(RtspServer.PREF_SUB_BITRATE, null)?.toIntOrNull() ?: RtspServer.DEFAULT_SUB_BITRATE_KBPS
-        val bitrate = H264HardwareEncoder.clampBitrate(kbps * 1000L)
-        val (w, h) = CameraGlPipe.scaledFrame(pipe.width, pipe.height, shortSide)
-        val enc = try {
-            H264HardwareEncoder(w, h, fps, bitrate, true, RtspServer.SUB_KEYFRAME_INTERVAL_SEC) { d, k, pts ->
-                rtsp.onVideoFrame(d, k, pts, RtspStream.SUB)
-            }
-        } catch (e: Exception) {
-            Log.w(TAG, "RTSP sub stream encoder ${w}x$h failed, sub stream carries the main stream: ${e.message}")
-            return
-        }
-        subEncoder = enc
-        // Switch the sub stream's source: viewers wait for the new encoder's first keyframe.
-        h264.subStreamEncoded = true
-        rtsp.resyncVideo(RtspStream.SUB)
-        if (!pipe.setSecondaryOutput(enc.inputSurface, w, h, fps)) {
-            Log.w(TAG, "RTSP sub stream could not be attached to the GL pipe, sub stream carries the main stream")
-            stopSubStream()
-            return
-        }
-        enc.requestKeyFrame()
-        Log.i(TAG, "RTSP sub stream ${w}x$h @${fps}fps ${bitrate / 1000}kbps")
-    }
-
-    private fun stopSubStream() {
-        val enc = subEncoder ?: return
-        subEncoder = null
-        h264StreamingEncoder?.subStreamEncoded = false
-        rtspServer?.resyncVideo(RtspStream.SUB)
-        h264StreamingEncoder?.h264HardwareEncoder?.requestKeyFrame()
-        (cameraXGlPipe ?: glPipe)?.setSecondaryOutput(null)
-        enc.stop()
-    }
-
-    private fun readMirrorPref(): Boolean {
-        val prefs = PreferenceManager.getDefaultSharedPreferences(this)
-        val id = camId()
-        if (id == null) return false
-        val phys = id.substringAfter(':', id)
-        return when {
-            prefs.contains("mirror_$id") -> prefs.getString("mirror_$id", null)?.toBoolean() ?: false
-            prefs.contains("mirror_$phys") -> prefs.getString("mirror_$phys", null)?.toBoolean() ?: false
-            else -> false
-        }
-    }
-
-    /** Per-camera rotate= knob (token then physical id fallback). Consumers apply their own
-     *  quantisation: the byte-buffer H.264 encoder snaps to 90° (YUV rotate cost) and the GL pipe
-     *  only acts on 90° multiples. Returns the raw stored angle. */
     private fun readRotatePref(): Int {
         val prefs = PreferenceManager.getDefaultSharedPreferences(this)
         val id = camId() ?: return 0
@@ -1076,327 +525,161 @@ class StreamingService : LifecycleService() {
         }
     }
 
-    /** Quantise a rotation to the nearest 90°, matching the H.264 byte-buffer encoder's snapping
-     *  (the raw value is persisted verbatim for the MJPEG pipeline, which rotates arbitrary angles). */
-    private fun quantizedRotation(angle: Int): Int {
-        val norm = ((angle % 360) + 360) % 360
-        return ((norm + 45) / 90 * 90) % 360
-    }
-
-    /** Surface-mode encoder + GL pipe, used by Camera1 H.264. [cameraSize] is the size Camera1
-     *  produces; the encoder is sized to the picture's shape after the manual rotate= control. */
-    private fun newPipe(cameraSize: Size): CameraGlPipe {
-        val prefs = PreferenceManager.getDefaultSharedPreferences(this)
-        val fps = prefs.getString("stream_fps", "30")?.toIntOrNull() ?: 30
-        val fpsCoerced = fps.coerceIn(1, 60)
-        val frame = surfaceEncoderSize(cameraSize)
-        val enc = H264HardwareEncoder(frame.width, frame.height, fpsCoerced, H264HardwareEncoder.bitrateFor(frame.width, frame.height), true) { d, k, pts -> h264StreamingEncoder?.broadcastH264(d, k, pts) }
-        h264StreamingEncoder?.setEncoder(enc)
-        streamingServerHelper?.resetH264Wait()
-        return CameraGlPipe(enc.inputSurface!!, frame.width, frame.height, fpsCoerced).also {
-            it.mirror = readMirrorPref()
-            it.rotation = quantizedRotation(readRotatePref())
-            it.start()
-            // Camera1 renders at [cameraSize]; the pipe turns that frame into [frame].
-            it.setCameraBufferSize(cameraSize.width, cameraSize.height)
-            glPipe = it
-        }
-    }
-
     private fun applyStored(b: CaptureBackend) {
         val p = PreferenceManager.getDefaultSharedPreferences(this)
-        // The torch is device-level, not per-camera, so it is restored ahead of the early return
-        // below — the per-camera settings need a resolved camera id, the torch does not.
-        if (p.getString(PREF_CAMERA_TORCH, "off") == "on") {
-            b.setTorch(true)
-            // The active lens may not own the flash unit (ultra-wide/depth); anchor the torch to
-            // the flash-capable rear camera instead so a lens switch never strands the state.
-            if (!b.hasFlashUnit) setDeviceTorch(true)
-        }
-        val id = camId()
-        if (id == null) return
+        val wantTorch = p.getString(PREF_CAMERA_TORCH, "off") == "on"
+        if (b.hasFlashUnit && wantTorch) b.setTorch(true)
+        val id = camId() ?: return
         val phys = id.substringAfter(':', id)
-        // Prefer token-specific prefs, fallback to physical id prefs
-        val exposure = when {
-            p.contains("exposure_$id") -> p.getString("exposure_$id", null)
-            p.contains("exposure_$phys") -> p.getString("exposure_$phys", null)
-            else -> null
-        }
-        exposure?.toIntOrNull()?.let { b.setExposure(it) }
-
         val zoom = when {
             p.contains("zoom_$id") -> p.getString("zoom_$id", null)
             p.contains("zoom_$phys") -> p.getString("zoom_$phys", null)
             else -> null
         }
         zoom?.toFloatOrNull()?.let { b.setZoom(it) }
-
-        val focus = when {
-            p.contains("focus_$id") -> p.getString("focus_$id", null)
-            p.contains("focus_$phys") -> p.getString("focus_$phys", null)
+        val exp = when {
+            p.contains("exposure_$id") -> p.getString("exposure_$id", null)
+            p.contains("exposure_$phys") -> p.getString("exposure_$phys", null)
             else -> null
         }
-        focus?.toFloatOrNull()?.let { b.setManualFocus(it) }
+        exp?.toIntOrNull()?.let { b.setExposure(it) }
+        val focusMode = p.getString("focus_mode", "continuous") ?: "continuous"
+        b.setFocusMode(focusMode)
+        if (focusMode == "manual") {
+            val focus = when {
+                p.contains("focus_$id") -> p.getString("focus_$id", null)
+                p.contains("focus_$phys") -> p.getString("focus_$phys", null)
+                else -> null
+            }
+            focus?.toFloatOrNull()?.let { b.setManualFocus(it) }
+        }
     }
 
-    /** Rear camera id that owns the flash unit (usually the main lens). Auxiliary rear lenses on
-     *  multi-camera phones often report no flash unit, yet physically share this one. */
-    private fun flashAnchorCameraId(): String? = try {
+    private fun camId(): String? =
+        selectedCameraId ?: if (frontFacing) "front" else "back"
+
+    private fun selectCamera(front: Boolean, id: String?) {
+        frontFacing = front
+        selectedCameraId = id
+    }
+
+    private fun firstCameraIdForFacing(front: Boolean): String? = try {
         val cm = getSystemService(Context.CAMERA_SERVICE) as CameraManager
-        cm.cameraIdList.firstOrNull { id ->
-            try {
-                val ch = cm.getCameraCharacteristics(id)
-                ch.get(CameraCharacteristics.FLASH_INFO_AVAILABLE) == true &&
-                    ch.get(CameraCharacteristics.LENS_FACING) != CameraCharacteristics.LENS_FACING_FRONT
-            } catch (_: Exception) { false }
-        }
+        val want = if (front) CameraCharacteristics.LENS_FACING_FRONT else CameraCharacteristics.LENS_FACING_BACK
+        cm.cameraIdList.firstOrNull { cm.getCameraCharacteristics(it).get(CameraCharacteristics.LENS_FACING) == want }
     } catch (_: Exception) { null }
 
-    /**
-     * Torch through [CameraManager.setTorchMode] — works with NO camera session open, so it keeps
-     * the LED lit while a flash-less lens (ultra-wide/depth) is streaming or while the camera
-     * restarts between lens switches. Returns false if the platform rejected it.
-     */
-    private fun setDeviceTorch(on: Boolean): Boolean {
-        deviceTorchOn = try {
-            val id = flashAnchorCameraId() ?: return false
-            (getSystemService(Context.CAMERA_SERVICE) as CameraManager).setTorchMode(id, on)
-            on
-        } catch (e: Exception) {
-            // Releasing the device torch while the camera session owns the flash
-            // is expected to fail with CAMERA_IN_USE — not a real error.
-            val msg = e.message ?: ""
-            if (!( !on && msg.contains("CAMERA_IN_USE"))) {
-                Log.w(TAG, "device torch($on): $msg")
-            }
-            false
+    private fun camera1IndexForSelectedOrFacing(front: Boolean): Int {
+        val sel = selectedCameraId
+        val physOrLogical = sel?.substringAfter(':', sel)?.toIntOrNull()
+            ?: sel?.substringBefore(':')?.toIntOrNull()
+        if (physOrLogical != null && physOrLogical in 0 until Camera.getNumberOfCameras()) return physOrLogical
+        val info = Camera.CameraInfo()
+        val want = if (front) Camera.CameraInfo.CAMERA_FACING_FRONT else Camera.CameraInfo.CAMERA_FACING_BACK
+        for (i in 0 until Camera.getNumberOfCameras()) {
+            Camera.getCameraInfo(i, info)
+            if (info.facing == want) return i
         }
-        return deviceTorchOn
+        return 0
     }
 
-    /**
-     * Going idle (last viewer left, no on-phone preview)? Hand the torch to the device channel
-     * BEFORE/AS the streaming session closes: [CameraManager.setTorchMode] needs no camera open,
-     * so a page reload or preview-off no longer takes the LED down with the session. The post-start
-     * verifier ([scheduleVerifyTorchRestored]) reclaims it for the next stream.
-     */
-    private fun bridgeTorchAcrossIdle() {
-        if (hasActiveClients() || currentSurfaceProvider != null) return
-        if (PreferenceManager.getDefaultSharedPreferences(this)
-                .getString(PREF_CAMERA_TORCH, "off") != "on") return
-        setDeviceTorch(true)
-    }
-
-    /**
-     * Torch restoration is best-effort at start time — enableTorch can fail while the HAL is still
-     * settling after a bind, and opening any camera can strip a device-channel torch. Re-check
-     * briefly and re-apply until it sticks, the user toggles it off, or the camera stops again.
-     */
-    private fun scheduleVerifyTorchRestored() {
-        if (PreferenceManager.getDefaultSharedPreferences(this)
-                .getString(PREF_CAMERA_TORCH, "off") != "on") {
-            if (deviceTorchOn) setDeviceTorch(false)
-            return
-        }
-        torchVerifyJob?.cancel()
-        torchVerifyJob = lifecycleScope.launch(Dispatchers.Main) {
-            // enableTorch reports failure ASYNC via its future (which flips getTorch() back to
-            // false), so the state must survive several consecutive checks before it is trusted.
-            var confirmed = 0
-            repeat(16) {
-                kotlinx.coroutines.delay(250)
-                if (!captureRunning) return@launch
-                val b = backend
-                when (PreferenceManager.getDefaultSharedPreferences(this@StreamingService)
-                        .getString(PREF_CAMERA_TORCH, "off")) {
-                    "on" -> if (b?.hasFlashUnit == true) {
-                        if (b.getTorch()) {
-                            confirmed++
-                            if (confirmed == 1) {
-                                // Session owns the LED now; drop any lingering device-channel
-                                // claim so the two mechanisms can't fight over one flash unit.
-                                if (deviceTorchOn) setDeviceTorch(false)
-                            } else if (confirmed >= 4) {
-                                return@launch
-                            }
-                        } else {
-                            confirmed = 0
-                            b.setTorch(true)
-                        }
-                    } else {
-                        // Device channel has no queryable state; re-arm through the settle window
-                        // in case the framework stripped it while a camera was opening.
-                        confirmed++
-                        setDeviceTorch(true)
-                        if (confirmed >= 8) return@launch
-                    }
-                    "off" -> {
-                        if (deviceTorchOn) setDeviceTorch(false)
-                        return@launch
-                    }
-                    else -> return@launch
-                }
-            }
-        }
-    }
-
-    // ---------------- snapshot (full resolution) ----------------
-
-    /**
-     * Full-resolution JPEG into RAM. [cameraId] is a Camera2 id ("0","1",…) or "front"/"back".
-     *  - already live on that camera → video snapshot (takePicture during the stream, no interruption).
-     *  - other camera, or camera off → start it (even with no live viewers), capture, then restore the
-     *    original stream / stop (single HAL: one camera open at a time).
-     * The whole pipeline is bounded by [SNAPSHOT_DEADLINE_MS] so a request can never hang the caller.
-     * A stale photo is never served: a failed capture only falls back to the last capture if that
-     * capture is still fresh ([SNAPSHOT_CACHE_MAX_AGE_MS]).
-     */
-    fun snapshot(cameraId: String): ByteArray? {
-        synchronized(snapLock) {
-            snapshotInProgress = true
+    private fun setDeviceTorch(on: Boolean) {
+        val cm = getSystemService(Context.CAMERA_SERVICE) as? CameraManager ?: return
+        val id = cm.cameraIdList.firstOrNull {
             try {
-                val deadline = System.currentTimeMillis() + SNAPSHOT_DEADLINE_MS
-                val target = resolveCamera(cameraId) ?: (frontFacing to selectedCameraId)
-                val targetFront = target.first
-                val targetCameraId = target.second
-                val key = if (targetFront) "front" else "back"
-                val hadViewers = hasActiveClients() || currentSurfaceProvider != null
+                val c = cm.getCameraCharacteristics(it)
+                c.get(CameraCharacteristics.FLASH_INFO_AVAILABLE) == true &&
+                    c.get(CameraCharacteristics.LENS_FACING) != CameraCharacteristics.LENS_FACING_FRONT
+            } catch (_: Exception) { false }
+        } ?: return
+        try {
+            cm.setTorchMode(id, on)
+            deviceTorchOn = on
+        } catch (_: Exception) {}
+    }
 
-                // Switch to the target camera, capture, then restore the original stream / stop.
-                fun captureViaRebind(): ByteArray? {
-                    val orig = frontFacing
-                    val origCameraId = selectedCameraId
-                    selectCamera(targetFront, targetCameraId)
-                    switchAndWait(force = true, deadline)   // starts the camera even with no live viewers
-                    val jpeg = backend?.let { captureFrom(it, key, deadline) }
-                    frontFacing = orig
-                    selectedCameraId = origCameraId
-                    launchMain {
-                        if (hadViewers) startCamera() else {
+    private fun bridgeTorchAcrossIdle() {
+        val prefs = PreferenceManager.getDefaultSharedPreferences(this)
+        if (prefs.getString(PREF_CAMERA_TORCH, "off") == "on") {
+            setDeviceTorch(true)
+        }
+    }
+
+    fun snapshot(cameraId: String? = null): ByteArray? {
+        val target = if (cameraId == null || cameraId == "current") {
+            frontFacing to selectedCameraId
+        } else {
+            resolveCamera(cameraId) ?: (frontFacing to selectedCameraId)
+        }
+        val isCurrent = target.first == frontFacing && target.second == selectedCameraId
+        val key = target.second ?: if (target.first) "front" else "back"
+
+        val prefs = PreferenceManager.getDefaultSharedPreferences(this)
+        val snapshotRes = prefs.getString("snapshot_res_$key", null)
+            ?: prefs.getString("snapshot_res_${key.substringAfter(':', key)}", "max")
+
+        if (snapshotRes == "stream" && isCurrent) {
+            val freshJpeg = mjpegStreamingEncoder?.lastFrameFresh(SNAPSHOT_STREAM_FRESH_MS)
+            if (freshJpeg != null) return freshJpeg
+        }
+
+        synchronized(snapLock) {
+            val cached = snapCache[key]
+            if (cached != null && (System.currentTimeMillis() - cached.atMs) <= SNAPSHOT_CACHE_MAX_AGE_MS) {
+                return cached.jpeg
+            }
+
+            val savedFront = frontFacing
+            val savedId = selectedCameraId
+            snapshotInProgress = true
+            val deadline = System.currentTimeMillis() + SNAPSHOT_DEADLINE_MS
+
+            try {
+                if (!isCurrent) {
+                    selectCamera(target.first, target.second)
+                    switchAndWait(force = true, deadline)
+                } else if (!captureRunning) {
+                    switchAndWait(force = true, deadline)
+                }
+                val b = backend ?: return null
+                return captureFrom(b, key, deadline)
+            } finally {
+                snapshotInProgress = false
+                if (!isCurrent) {
+                    selectCamera(savedFront, savedId)
+                    if (hasActiveClients() || currentSurfaceProvider != null) {
+                        launchMain { startCamera(force = true) }
+                    } else {
+                        launchMain {
                             stopCamera()
-                            // The snapshot's temporary session may have stripped the idle torch.
                             bridgeTorchAcrossIdle()
                         }
                     }
-                    return jpeg ?: freshCached(key)
-                }
-
-                val live = backend
-                if (live != null && targetFront == frontFacing && targetCameraId == selectedCameraId) {
-                    // "stream": reuse the last streamed frame (no camera rebind); "max": full-res capture.
-                    val prefs = PreferenceManager.getDefaultSharedPreferences(this)
-                    val idForPref = targetCameraId ?: key
-                    val res = prefs.getString("snapshot_res_$idForPref", "max")
-                    if (res == "stream") {
-                        // Only trust the cached stream frame while it's actually fresh — with no live
-                        // MJPEG viewers no frames are being encoded, so it could be minutes old.
-                        mjpegStreamingEncoder?.lastFrameFresh(SNAPSHOT_STREAM_FRESH_MS)?.let { return it }
+                } else if (!hasActiveClients() && currentSurfaceProvider == null && !cameraHeldForTorch) {
+                    launchMain {
+                        stopCamera()
+                        bridgeTorchAcrossIdle()
                     }
-                    // A CameraX backend bound but delivering no analysis frames can't take a still
-                    // either (ImageCapture shares the same dead session). Give a fresh bind a moment
-                    // for its first frame (healthy devices frame within ~1s); if none ever arrives the
-                    // session is broken — remember it and rebind via startCamera() so it falls back to
-                    // Camera1 before capturing.
-                    if (live is CameraXCapture && !live.hasProducedFrame) {
-                        if (prefs.getBoolean("camera2_unusable", false)) {
-                            // Known-broken device: go straight to Camera1, no grace wait.
-                            return captureViaRebind()
-                        }
-                        var waited = 0L
-                        while (!live.hasProducedFrame && waited < CAMERAX_FRAME_GRACE_MS &&
-                            System.currentTimeMillis() < deadline) {
-                            try { Thread.sleep(100) } catch (_: Exception) {}
-                            waited += 100
-                        }
-                        if (live.hasProducedFrame) {
-                            return captureFrom(live, key, deadline) ?: freshCached(key)
-                        }
-                        prefs.edit().putBoolean("camera2_unusable", true).apply()
-                        return captureViaRebind()
-                    }
-                    return captureFrom(live, key, deadline) ?: freshCached(key)
                 }
-                return captureViaRebind()
-            } finally {
-                snapshotInProgress = false
             }
         }
     }
 
-    /** Last good capture for [key], but only if it is still fresh enough to count as "now". */
-    private fun freshCached(key: String): ByteArray? =
-        snapCache[key]?.takeIf { System.currentTimeMillis() - it.atMs <= SNAPSHOT_CACHE_MAX_AGE_MS }?.jpeg
-
-    /** camera= argument. Accepts "front"/"back"/"toggle" or a Camera2 id ("0","1",…). */
-    private fun resolveCamera(value: String): Pair<Boolean, String?>? = when {
-        value.equals("front", true) -> true to firstCameraIdForFacing(true)
-        value.equals("back", true) -> false to firstCameraIdForFacing(false)
-        value.equals("toggle", true) -> {
-            val front = !frontFacing
-            front to firstCameraIdForFacing(front)
+    private fun resolveCamera(token: String): Pair<Boolean, String?>? {
+        val cm = getSystemService(Context.CAMERA_SERVICE) as CameraManager
+        return when (token.lowercase()) {
+            "back" -> false to firstCameraIdForFacing(false)
+            "front" -> true to firstCameraIdForFacing(true)
+            else -> try {
+                val logicalId = token.substringBefore(':')
+                val ch = cm.getCameraCharacteristics(logicalId)
+                val facing = ch.get(CameraCharacteristics.LENS_FACING) == CameraCharacteristics.LENS_FACING_FRONT
+                facing to token
+            } catch (_: Exception) { null }
         }
-        else -> try {
-            val cm = getSystemService(Context.CAMERA_SERVICE) as CameraManager
-            val token = parseCameraToken(value)
-
-            // If the logical ID is not in the camera list, it might be a physical ID
-            // Try to find which logical camera it belongs to
-            val actualLogicalId = if (cm.cameraIdList.contains(token.logicalId)) {
-                token.logicalId
-            } else {
-                // Search for the logical camera that has this physical ID
-                cm.cameraIdList.firstOrNull { logicalId ->
-                    try {
-                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-                            cm.getCameraCharacteristics(logicalId).physicalCameraIds.contains(token.logicalId)
-                        } else false
-                    } catch (_: Throwable) { false }
-                } ?: token.logicalId
-            }
-
-            if (cm.cameraIdList.contains(actualLogicalId)) {
-                val ch = cm.getCameraCharacteristics(actualLogicalId)
-                val actualPhysicalId = if (token.physicalId != null) {
-                    token.physicalId
-                } else if (actualLogicalId != token.logicalId) {
-                    // The original value was a physical ID, use it as the physical ID
-                    token.logicalId
-                } else {
-                    null
-                }
-
-                val hasPhysicalCameraIds = Build.VERSION.SDK_INT >= Build.VERSION_CODES.P &&
-                    ch.physicalCameraIds.contains(actualPhysicalId)
-                if (actualPhysicalId != null && !hasPhysicalCameraIds) {
-                    null
-                } else {
-                    // On older devices, the physical camera is also a top-level camera ID;
-                    // use it directly so CameraX can open it without physical-camera routing.
-                    val finalCameraId = if (actualPhysicalId != null && cm.cameraIdList.contains(actualPhysicalId)) {
-                        actualPhysicalId
-                    } else if (actualPhysicalId != null) {
-                        "$actualLogicalId:$actualPhysicalId"
-                    } else {
-                        actualLogicalId
-                    }
-                    when (ch.get(CameraCharacteristics.LENS_FACING)) {
-                        CameraCharacteristics.LENS_FACING_FRONT -> true to finalCameraId
-                        CameraCharacteristics.LENS_FACING_BACK -> false to finalCameraId
-                        else -> null
-                    }
-                }
-            } else {
-                null
-            }
-        } catch (_: Throwable) { null }
     }
 
-    /** Take one still from [b] (the backend autofocuses internally). Blocks the caller on a latch. */
     private fun captureFrom(b: CaptureBackend, key: String, deadlineMs: Long): ByteArray? {
-        // A capture can fail transiently (camera mid-restart, another still's restore rebind still
-        // running, HAL briefly busy). Retry cheaply until the deadline rather than giving up on the
-        // first miss, and always capture from the CURRENT backend — a restart/fallback can swap it
-        // mid-snapshot, and a stale released instance can only fail.
         var result: ByteArray? = null
         while (System.currentTimeMillis() < deadlineMs) {
             val target = backend ?: b
@@ -1413,17 +696,11 @@ class StreamingService : LifecycleService() {
             val maxSize = DeviceMemoryHelper.maxSnapshotBytes(this@StreamingService)
             if (it.size <= maxSize) {
                 snapCache[key] = CachedSnapshot(it, System.currentTimeMillis())
-            } else {
-                Log.w(TAG, "Snapshot too large to cache (${it.size} bytes > $maxSize), skipping cache")
             }
         }
         return result
     }
 
-    /**
-     * Turn a still's pixels by the manual rotate= setting. EXIF is not touched, so the image
-     * carries no orientation tag telling a viewer to rotate it on top of the manual angle.
-     */
     private fun rotateSnapshot(jpeg: ByteArray, degrees: Int): ByteArray {
         val angle = ((degrees % 360) + 360) % 360
         if (angle == 0) return jpeg
@@ -1441,61 +718,40 @@ class StreamingService : LifecycleService() {
                     } finally { out.close() }
                 } finally { if (rotated !== bmp) rotated.recycle() }
             } finally { bmp.recycle() }
-        } catch (e: OutOfMemoryError) {
-            Log.e(TAG, "snapshot rotate OOM")
-            try { System.gc() } catch (_: Exception) {}
-            jpeg
-        } catch (e: Exception) {
-            Log.e(TAG, "snapshot rotate: ${e.message}")
-            jpeg
-        }
+        } catch (_: Exception) { jpeg }
     }
 
-    /** Restart the camera on the new facing and wait until the backend is bound + 3A converges. */
     private fun switchAndWait(force: Boolean, deadlineMs: Long) {
-        val l = CountDownLatch(1); launchMain { startCamera(force); l.countDown() }
+        val l = CountDownLatch(1)
+        launchMain { startCamera(force); l.countDown() }
         try { l.await((deadlineMs - System.currentTimeMillis()).coerceAtLeast(0L), TimeUnit.MILLISECONDS) } catch (_: Exception) {}
-        var n = 0; while (n < 40 && backend?.ready != true && System.currentTimeMillis() < deadlineMs) {
-            try { Thread.sleep(100) } catch (_: Exception) {}; n++
+        var n = 0
+        while (n < 40 && backend?.ready != true && System.currentTimeMillis() < deadlineMs) {
+            try { Thread.sleep(100) } catch (_: Exception) {}
+            n++
         }
-        // Let auto AE/AWB converge on the fresh camera. The front sensor is far slower in low light
-        // (under-converged = blue/dark), so give it longer; the back locks quickly. Never exceed the deadline.
         val convergeMs = (deadlineMs - System.currentTimeMillis()).coerceAtLeast(0L)
         if (convergeMs > 0) {
-            try { Thread.sleep(minOf(convergeMs, if (frontFacing) 2500 else 700)) } catch (_: Exception) {}
+            try { Thread.sleep(minOf(convergeMs, if (frontFacing) 2000 else 600)) } catch (_: Exception) {}
         }
     }
 
-    // ---------------- controls ----------------
-
-    /**
-     * GET /?<key>=<value> (proxied as /api/video/control):
-     *   torch=on|off|toggle   focus_distance=<0..1|-1>
-     *   exposure=<ev>   zoom=<ratio>
-     *   camera=<id>|front|back|toggle   resolution=WxH   api=auto|camerax|camera1
-     */
-    /** Last accepted client timestamp per control key. */
-    private val controlTimestamps = HashMap<String, Long>()
-
-    /** True unless [ts] is older-or-equal to the last one accepted for [key] (0 = no ordering info). */
     private fun acceptControl(key: String, ts: Long): Boolean {
-        if (ts == 0L) return true
-        if (ts <= (controlTimestamps[key] ?: 0L)) return false
-        controlTimestamps[key] = ts
+        if (ts <= 0L) return true
+        val prefs = PreferenceManager.getDefaultSharedPreferences(this)
+        val last = prefs.getLong("last_ts_$key", 0L)
+        if (ts <= last) return false
+        prefs.edit().putLong("last_ts_$key", ts).apply()
         return true
     }
 
-    // Synchronized so the timestamp check and the (async) dispatch stay ordered per request.
-    @Synchronized
     private fun handleRemoteControl(key: String, value: String, ts: Long = 0L) {
         if (!acceptControl(key, ts)) return
         val prefs = PreferenceManager.getDefaultSharedPreferences(this)
-        // Use the stored camera preference key when persisting per-camera settings so
-        // reads from getStreamSettings() (which uses the saved `camera_id`) match.
         val storedCameraPref = prefs.getString(PREF_CAMERA_ID, null)
         val id = storedCameraPref ?: camId()
-        // physical id fallback (if id is "logical:physical" this extracts physical)
-        val physicalId = id?.substringAfter(':', id ?: "") ?: ""
+        val physicalId = id?.substringAfter(':', id) ?: ""
+
         when (key) {
             "torch" -> {
                 val current = backend?.getTorch()
@@ -1506,22 +762,13 @@ class StreamingService : LifecycleService() {
                     "toggle" -> !current
                     else -> return
                 }
-                // Persist before opening the camera: applyStored() reads this pref while the
-                // backend is being set up, which is what makes the torch survive the camera
-                // restarts that happen every time a stream starts or stops.
                 prefs.edit().putString(PREF_CAMERA_TORCH, if (next) "on" else "off").apply()
                 launchMain {
                     if (next && !captureRunning) {
-                        // Nothing is streaming, so there is no backend to talk to. Open the camera
-                        // just for the torch and record that this session is ours to close.
                         cameraHeldForTorch = true
                         startCamera(force = true)
                     }
                     backend?.setTorch(next)
-                    // The active lens may not own the flash unit (ultra-wide/depth) — drive the
-                    // torch through the flash-capable rear camera instead so it still lights.
-                    // On "off" always clear the device channel too: a lens switch can have moved
-                    // the torch between mechanisms.
                     if (backend?.hasFlashUnit != true || !next) setDeviceTorch(next)
                     if (!next && cameraHeldForTorch) {
                         cameraHeldForTorch = false
@@ -1553,14 +800,20 @@ class StreamingService : LifecycleService() {
                 }
                 launchMain { backend?.setManualFocus(f) }
             }
-            "snapshot_res" -> {
-                if (value == "max" || value == "stream") {
-                    val prefs = PreferenceManager.getDefaultSharedPreferences(this)
-                    val sid = camId()
-                    if (sid != null) {
-                        prefs.edit().putString("snapshot_res_$sid", value).apply()
-                        val phys = sid.substringAfter(':', sid)
-                        if (phys.isNotBlank() && phys != sid) prefs.edit().putString("snapshot_res_$phys", value).apply()
+            "focus_mode" -> {
+                prefs.edit().putString("focus_mode", value).apply()
+                launchMain { backend?.setFocusMode(value) }
+            }
+            "focus_trigger" -> {
+                launchMain { backend?.triggerAutoFocus() }
+            }
+            "focus_point" -> {
+                val parts = value.split(",")
+                if (parts.size == 2) {
+                    val x = parts[0].toFloatOrNull()
+                    val y = parts[1].toFloatOrNull()
+                    if (x != null && y != null) {
+                        launchMain { backend?.focusOnPoint(x, y) }
                     }
                 }
             }
@@ -1568,13 +821,7 @@ class StreamingService : LifecycleService() {
                 val keepTorchOn = backend?.getTorch() == true
                 val target = resolveCamera(value) ?: return
                 selectCamera(target.first, target.second)
-                // Save the original value (e.g. "1:3") so the dropdown can match it;
-                // selectedCameraId may be the bare physical ID (e.g. "3") used by CameraX.
-                // Persist the canonical camera id (what camId() will return) so per-camera
-                // preferences are stored/loaded under the same key format.
-                prefs.edit()
-                    .putString(PREF_CAMERA_ID, camId())
-                    .apply()
+                prefs.edit().putString(PREF_CAMERA_ID, camId()).apply()
                 launchMain {
                     if (captureRunning) {
                         debouncedStartCamera(force = true)
@@ -1593,41 +840,15 @@ class StreamingService : LifecycleService() {
             }
             "rotate" -> {
                 val angle = value.toIntOrNull() ?: return
-                // normalize to 0..359
                 val norm = ((angle % 360) + 360) % 360
-                // Persist rotate per-camera
                 prefs.edit().putInt("camera_rotate_$id", norm).apply()
                 if (physicalId.isNotBlank() && physicalId != id) prefs.edit().putInt("camera_rotate_$physicalId", norm).apply()
-                // H.264 only supports 90° steps (the raw value is persisted verbatim for the MJPEG
-                // pipeline, which rotates arbitrary angles). Apply the quantised value live to the
-                // surface-mode GL pipes so they snap to the same steps the byte-buffer encoder uses.
-                val q = quantizedRotation(norm)
-                glPipe?.rotation = q
-                cameraXGlPipe?.rotation = q
-                // The surface encoder's frame follows the picture's shape, so a quarter turn needs
-                // a new encoder (the byte-buffer encoder resizes itself per frame). Applies to both
-                // the CameraX and Camera1 GL pipes. Not while recording: restarting the camera
-                // would end the recording.
-                val current = h264StreamingEncoder?.h264HardwareEncoder
-                val camera1Pipe = glPipe
-                val pipe = cameraXGlPipe ?: camera1Pipe
-                if (pipe != null && current != null && localRecorder?.isRecording != true) {
-                    val cameraSize = if (camera1Pipe != null && camera1Pipe.frameWidth > 0 && camera1Pipe.frameHeight > 0) {
-                        Size(camera1Pipe.frameWidth, camera1Pipe.frameHeight)
-                    } else {
-                        desiredSize()
-                    }
-                    val target = surfaceEncoderSize(cameraSize)
-                    if (target.width != current.width || target.height != current.height) debouncedStartCamera()
-                }
             }
             "scale" -> {
-                // Persist scale per-camera (string like "1.0")
                 prefs.edit().putString("stream_scale_$id", value).apply()
                 if (physicalId.isNotBlank() && physicalId != id) prefs.edit().putString("stream_scale_$physicalId", value).apply()
             }
             "contrast" -> {
-                // Persist contrast per-camera
                 prefs.edit().putString("camera_contrast_$id", value).apply()
                 if (physicalId.isNotBlank() && physicalId != id) prefs.edit().putString("camera_contrast_$physicalId", value).apply()
             }
@@ -1635,16 +856,29 @@ class StreamingService : LifecycleService() {
                 if (value in listOf("true", "false")) {
                     prefs.edit().putString("mirror_$id", value).apply()
                     if (physicalId.isNotBlank() && physicalId != id) prefs.edit().putString("mirror_$physicalId", value).apply()
-                    val enabled = value == "true"
-                    glPipe?.mirror = enabled
-                    cameraXGlPipe?.mirror = enabled
+                }
+            }
+            "quality" -> {
+                val q = value.toIntOrNull()
+                if (q != null && q in 10..100) {
+                    prefs.edit().putString("stream_quality", q.toString()).apply()
+                }
+            }
+            "bitrate" -> {
+                val b = value.toIntOrNull()
+                if (b != null && b >= 0) {
+                    prefs.edit().putString("stream_bitrate", b.toString()).apply()
+                }
+            }
+            "fps" -> {
+                val fps = value.toIntOrNull()
+                if (fps != null && fps in 1..60) {
+                    prefs.edit().putString("stream_fps", fps.toString()).apply()
                 }
             }
             "api" -> {
                 if (value in listOf("auto", "camerax", "camera1")) {
                     prefs.edit().putString("capture_api", value).apply()
-                    // Explicitly choosing CameraX again re-tests the device (clears the remembered
-                    // "Camera2 session never configures" flag).
                     if (value != "camera1") prefs.edit().putBoolean("camera2_unusable", false).apply()
                     debouncedStartCamera()
                 }
@@ -1660,9 +894,7 @@ class StreamingService : LifecycleService() {
                 launchMain {
                     if (enabled) {
                         if (captureRunning) debouncedStartCamera() else startCameraIfNeeded()
-                    } else if (localRecorder?.isRecording != true &&
-                        !encoders.any { it.hasClients() } && currentSurfaceProvider == null) {
-                        // Motion was the only frame consumer: release the camera again.
+                    } else if (!encoders.any { it.hasClients() } && currentSurfaceProvider == null) {
                         stopCamera()
                         bridgeTorchAcrossIdle()
                     }
@@ -1674,130 +906,8 @@ class StreamingService : LifecycleService() {
             }
         }
 
-        // Delegate to encoders for codec-specific controls
         encoders.forEach { encoder ->
-            if (encoder.handleRemoteControl(key, value)) {
-                return // Command was handled by an encoder
-            }
+            encoder.handleRemoteControl(key, value)
         }
-    }
-
-
-    // ---------------- local recording ----------------
-
-    fun startRecording(): RecordingResponse {
-        if (localRecorder?.isRecording == true) return Triple(false, "409 Conflict",
-            """{"error":"already_recording","message":"Recording is already in progress","uri":"${localRecorder?.recordingLocation() ?: ""}"}"""
-        )
-
-        // Make the camera deliver frames and initialize the H.264 encoder even with no viewers
-        // connected; cleared once localRecorder takes over (or the start fails).
-        recordingNeeded = true
-
-        // Ensure camera and H.264 encoder are started on demand
-        if (!captureRunning || !hasActiveClients()) {
-            val latch = CountDownLatch(1)
-            launchMain {
-                startCamera(force = true)
-                latch.countDown()
-            }
-            try { latch.await(3, TimeUnit.SECONDS) } catch (_: Exception) {}
-        }
-
-        var enc = h264StreamingEncoder?.h264HardwareEncoder
-        var attempts = 0
-        while (enc == null && attempts < 20) {
-            try { Thread.sleep(100) } catch (_: Exception) {}
-            enc = h264StreamingEncoder?.h264HardwareEncoder
-            attempts++
-        }
-
-        if (enc == null) {
-            recordingNeeded = false
-            restoreNoViewerCameraState()
-            return Triple(false, "503 Service Unavailable",
-                """{"error":"no_encoder","message":"Failed to initialize H.264 encoder"}"""
-            )
-        }
-
-        return try {
-            val recorder = LocalRecorder(this, enc.width, enc.height)
-            recorder.start()
-            enc.onRecordFrame = { bytes, isKey, pts -> recorder.feedFrame(bytes, isKey, pts) }
-            enc.requestKeyFrame()
-            localRecorder = recorder
-            recordingNeeded = false
-            Triple(true, "201 Created", recorder.statusJson())
-        } catch (e: Exception) {
-            Log.e(TAG, "startRecording failed", e)
-            recordingNeeded = false
-            restoreNoViewerCameraState()
-            Triple(false, "500 Internal Server Error",
-                """{"error":"start_failed","message":"${e.message?.replace("\"", "'") ?: "unknown error"}"}"""
-            )
-        }
-    }
-
-    fun stopRecording(): RecordingResponse {
-        val recorder = localRecorder ?: return Triple(false, "409 Conflict",
-            """{"error":"not_recording","message":"No recording is in progress"}"""
-        )
-        return try {
-            h264StreamingEncoder?.h264HardwareEncoder?.onRecordFrame = null
-            val finalStatus = recorder.statusJson()
-            recorder.stop()
-            localRecorder = null
-
-            // If no remote network streaming clients are connected, update camera state
-            if (!encoders.any { it.hasClients() }) {
-                restoreNoViewerCameraState()
-            }
-            Triple(true, "200 OK", finalStatus)
-        } catch (e: Exception) {
-            Log.e(TAG, "stopRecording failed", e)
-            localRecorder = null
-            Triple(false, "500 Internal Server Error",
-                """{"error":"stop_failed","message":"${e.message?.replace("\"", "'") ?: "unknown error"}"}"""
-            )
-        }
-    }
-
-    fun getRecordingStatus(): String {
-        return localRecorder?.statusJson()
-            ?: """{"recording":false}"""
-    }
-
-    /**
-     * Bring the camera back to the no-viewer baseline: fully stop it when nothing else needs it,
-     * or keep/restart it in preview-only mode when the on-phone preview surface is attached.
-     * Does nothing while network streaming clients are still connected.
-     */
-    private fun restoreNoViewerCameraState() {
-        if (encoders.any { it.hasClients() }) return
-        launchMain {
-            if (currentSurfaceProvider != null) {
-                debouncedStartCamera()
-            } else {
-                stopCamera()
-            }
-        }
-    }
-
-    /** Safely stops any active recording (used in stopCamera/onDestroy safety nets). */
-    private fun safeStopRecording() {
-        try {
-            h264StreamingEncoder?.h264HardwareEncoder?.onRecordFrame = null
-            localRecorder?.stop()
-        } catch (e: Exception) {
-            Log.e(TAG, "safeStopRecording: ${e.message}")
-        } finally {
-            localRecorder = null
-        }
-    }
-
-    private fun generateRandomPassword(): String {
-        val r = SecureRandom()
-        val all = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
-        return (1..12).map { all[r.nextInt(all.length)] }.joinToString("")
     }
 }

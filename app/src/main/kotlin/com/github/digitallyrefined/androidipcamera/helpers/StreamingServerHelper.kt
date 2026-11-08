@@ -50,16 +50,13 @@ import org.json.JSONObject
 class StreamingServerHelper(
     private val context: Context,
     private val streamPort: Int = 4444,
-    private val maxClients: Int = 3,
-    private val maxAuthenticatedClients: Int = 10, // Higher limit for authenticated users
+    private val maxClients: Int = 5,
+    private val maxAuthenticatedClients: Int = 15,
     private val onLog: (String) -> Unit = {},
     private val onClientConnected: () -> Unit = {},
     private val onClientDisconnected: () -> Unit = {},
     private val onControlCommand: (String, String, Long) -> Unit = { _, _, _ -> },
     private val onSnapshot: (String) -> ByteArray? = { null },
-    private val onRecordStart: () -> Triple<Boolean, String, String> = { Triple(false, "503 Service Unavailable", """{"error":"unavailable"}""") },
-    private val onRecordStop: () -> Triple<Boolean, String, String> = { Triple(false, "409 Conflict", """{"error":"not_recording"}""") },
-    private val onRecordStatus: () -> String = { """{"recording":false}""" },
     private val onStreamingEnabledChanged: (Boolean) -> Unit = {}
 ) {
     data class Client(
@@ -68,7 +65,6 @@ class StreamingServerHelper(
         val writer: PrintWriter,
         val connectedAt: Long = System.currentTimeMillis(),
         val isAuthenticated: Boolean = false,
-        @Volatile var waitingKey: Boolean = true, // H.264: skip frames until first keyframe
         @Volatile var lastSuccessfulWriteMs: Long = System.currentTimeMillis()
     ) {
         fun markWriteSuccess() {
@@ -87,7 +83,6 @@ class StreamingServerHelper(
     @Volatile
     private var isStarting = false
     private val clients = CopyOnWriteArrayList<Client>()
-    private val h264Clients = CopyOnWriteArrayList<Client>()  // raw H.264 (/h264) viewers
     private val audioClients = CopyOnWriteArrayList<Socket>()
     private val failedAttempts = ConcurrentHashMap<String, FailedAttempt>()
     @Volatile
@@ -131,17 +126,7 @@ class StreamingServerHelper(
     /** Base delay between bind retries (exponential backoff: 200, 400, 800, 1600, 3200 ms). */
     private val SOCKET_BIND_RETRY_DELAY_MS = 200L
 
-    /** GET /files, GET|DELETE /files/<filename> — see [FileManager]. */
-    private val fileManager = FileManager(context, onLog)
-
     fun getClients(): List<Client> = clients.toList()
-    fun getH264Clients(): List<Client> = h264Clients.toList()
-    fun resetH264Wait() { h264Clients.forEach { it.waitingKey = true } }  // resync viewers at next keyframe
-    fun removeH264Client(client: Client) {
-        if (!h264Clients.remove(client)) return
-        try { client.socket.close() } catch (_: Exception) {}
-        onClientDisconnected()
-    }
 
     private fun parseQueryParams(uri: String): Map<String, String> {
         val query = uri.substringAfter("?", missingDelimiterValue = "")
@@ -694,46 +679,6 @@ class StreamingServerHelper(
                 return
             }
 
-            // ---- Recording endpoints ----
-            if (path == "/record/start" && requestParts[0] == "POST") {
-                val (_, status, json) = onRecordStart()
-                writer.print("HTTP/1.1 $status\r\n")
-                writer.print("Content-Type: application/json\r\n")
-                writer.print("Connection: close\r\n\r\n")
-                writer.print(json)
-                writer.flush()
-                try { socket.close() } catch (_: Exception) {}
-                return
-            }
-
-            if (path == "/record/stop" && requestParts[0] == "POST") {
-                val (_, status, json) = onRecordStop()
-                writer.print("HTTP/1.1 $status\r\n")
-                writer.print("Content-Type: application/json\r\n")
-                writer.print("Connection: close\r\n\r\n")
-                writer.print(json)
-                writer.flush()
-                try { socket.close() } catch (_: Exception) {}
-                return
-            }
-
-            if (path == "/record/status") {
-                val json = onRecordStatus()
-                writer.print("HTTP/1.1 200 OK\r\n")
-                writer.print("Content-Type: application/json\r\n")
-                writer.print("Connection: close\r\n\r\n")
-                writer.print(json)
-                writer.flush()
-                try { socket.close() } catch (_: Exception) {}
-                return
-            }
-
-            // ---- Recorded files endpoints (Movies/AndroidIPCamera or the custom folder) ----
-            if (fileManager.handleRequest(httpMethod, path, writer, outputStream)) {
-                try { socket.close() } catch (_: Exception) {}
-                return
-            }
-
             if (uri.contains("?")) {
                 val params = parseQueryParams(uri)
                 val ts = params["ts"]?.toLongOrNull() ?: 0L // for ordering; 0 = none
@@ -935,51 +880,25 @@ class StreamingServerHelper(
                 return
             }
 
-            if (path == "/video/h264") {
-                // Raw Annex-B H.264 elementary stream (hardware-encoded). Browser plays via jMuxer.
-                if (handleMaxH264Clients(socket, isAuthenticated = enableAuth)) return
-                writer.print("HTTP/1.1 200 OK\r\n")
-                writer.print("Connection: keep-alive\r\n")
-                writer.print("Cache-Control: no-cache, no-store, must-revalidate\r\n")
-                writer.print("Content-Type: video/h264\r\n\r\n")
-                writer.flush()
-                val client = Client(socket, outputStream, writer, System.currentTimeMillis(), isAuthenticated = enableAuth)
-                val accepted = synchronized(this) {
-                    if (generation != serverGeneration) false
-                    else { h264Clients.add(client); true }
-                }
-                if (!accepted) {
-                    try { socket.close() } catch (_: Exception) {}
-                    return
-                }
-                onClientConnected()  // starts camera + encoder
-                try {
-                    while (socket.isConnected && !socket.isClosed) {
-                        if (reader.ready()) { if (reader.readLine() == null) break }
-                        Thread.sleep(1000)
-                    }
-                } catch (_: Exception) {
-                } finally {
-                    removeH264Client(client)
-                }
-                return
-            }
-
-            if (path == "/video/mjpeg") {
+            if (path == "/video/mjpeg" || path == "/video" || path == "/mjpeg") {
                 // AUTHENTICATED CONNECTION if auth is enabled - No rate limiting, higher connection limits
                 if (handleMaxClients(socket, isAuthenticated = enableAuth)) return
 
+                try {
+                    socket.tcpNoDelay = true
+                    socket.sendBufferSize = 64 * 1024
+                } catch (_: Exception) {}
+
                 // Send HTTP response headers for MJPEG stream
-                // Use HTTP/1.1 with keep-alive for better streaming performance
                 writer.print("HTTP/1.1 200 OK\r\n")
                 writer.print("Connection: keep-alive\r\n")
-                writer.print("Cache-Control: no-cache, no-store, must-revalidate\r\n")
+                writer.print("Cache-Control: no-cache, no-store, must-revalidate, max-age=0\r\n")
                 writer.print("Pragma: no-cache\r\n")
                 writer.print("Expires: 0\r\n")
                 writer.print("Content-Type: multipart/x-mixed-replace; boundary=frame\r\n\r\n")
                 writer.flush()
 
-                // Add client to list - frames will be sent from MainActivity.processImage()
+                // Add client to list - frames will be sent from MjpegStreamingEncoder
                 val client = Client(socket, outputStream, writer, System.currentTimeMillis(), isAuthenticated = enableAuth)
                 val accepted = synchronized(this) {
                     if (generation != serverGeneration) false
@@ -991,20 +910,16 @@ class StreamingServerHelper(
                 }
                 onClientConnected()
 
-                // Keep connection alive - frames will be sent from MainActivity.processImage()
-                // Wait for connection to close or be removed
+                // Keep connection alive - detect when client disconnects
                 try {
-                    // Read from socket to detect when client disconnects
                     while (socket.isConnected && !socket.isClosed) {
-                        // Check if socket has data (client disconnect will cause exception)
                         if (reader.ready()) {
                             val line = reader.readLine()
-                            if (line == null) break // Client disconnected
+                            if (line == null) break
                         }
-                        Thread.sleep(1000) // Check every second
+                        Thread.sleep(1000)
                     }
                 } catch (e: IOException) {
-                    // Client disconnected
                 } finally {
                     removeClient(client)
                 }
@@ -1294,29 +1209,6 @@ class StreamingServerHelper(
         return false
     }
 
-    fun handleMaxH264Clients(socket: Socket, isAuthenticated: Boolean = false): Boolean {
-        val maxAllowed = if (isAuthenticated) maxAuthenticatedClients else maxClients
-        if (h264Clients.size >= maxAllowed) {
-            socket.getOutputStream().writer().use { writer ->
-                writer.write("HTTP/1.1 503 Service Unavailable\r\n")
-                writer.write("Retry-After: 30\r\n") // 30 seconds
-                writer.write("Connection: close\r\n\r\n")
-                writer.flush()
-            }
-            socket.close()
-            // Add small delay to prevent rapid reconnection loops
-            Thread.sleep(100)
-            return true
-        }
-        return false
-    }
-
-    /**
-     * Reset stored per-camera preferences for a given camera id.
-     * This will remove stored zoom/exposure/focus/rotate/scale/contrast prefs
-     * for the camera token and its physical fallback, so the server will
-     * return defaults (which now prefer the camera-reported `minZoom`).
-     */
     fun resetCameraPreferences(cameraId: String) {
         try {
             val prefs = PreferenceManager.getDefaultSharedPreferences(context)
@@ -1350,11 +1242,14 @@ class StreamingServerHelper(
                     "zoom" to String.format(Locale.US, "%.1f", minZoom),
                     "exposure" to "0",
                     "focus_distance" to "-1",
+                    "focus_mode" to "continuous",
                     "scale" to "1.0",
                     "contrast" to "0",
                     "mirror" to "false",
                     "fps" to "30",
-                    "rotate" to "0"
+                    "rotate" to "0",
+                    "quality" to "85",
+                    "bitrate" to "0"
                 )
 
                 // Dispatch each control through the central handler so prefs are re-written
@@ -1426,12 +1321,10 @@ class StreamingServerHelper(
 
     fun closeClientConnection() {
         val clientsToClose = clients.toList()
-        val h264ClientsToClose = h264Clients.toList()
         val audioClientsToClose = audioClients.toList()
         clients.clear()
-        h264Clients.clear()
         audioClients.clear()
-        (clientsToClose + h264ClientsToClose).forEach { client ->
+        clientsToClose.forEach { client ->
             try {
                 client.socket.close()
             } catch (e: IOException) {
@@ -1445,7 +1338,7 @@ class StreamingServerHelper(
                 onLog("Error closing audio connection: ${e.message}")
             }
         }
-        if (clientsToClose.isNotEmpty() || h264ClientsToClose.isNotEmpty()) onClientDisconnected()
+        if (clientsToClose.isNotEmpty()) onClientDisconnected()
     }
 
     fun removeClient(client: Client) {
@@ -1477,13 +1370,15 @@ class StreamingServerHelper(
         val resolution: String,
         val streamRes: String,
         val fps: String,
+        val quality: String,
+        val bitrate: String,
+        val focusMode: String,
         val torch: String,
         val deviceHasFlash: Boolean,
         val audioGain: String,
         val snapshotRes: String,
         val motionDetectionEnabled: Boolean,
         val motionSensitivity: String,
-        val onvifEnabled: Boolean,
     )
 
     private data class DeviceInfo(
@@ -1542,6 +1437,9 @@ class StreamingServerHelper(
                 put("resolution", settings.resolution)
                 put("streamRes", settings.streamRes)
                 put("fps", settings.fps)
+                put("quality", settings.quality)
+                put("bitrate", settings.bitrate)
+                put("focusMode", settings.focusMode)
                 put("torch", settings.torch)
                 // Whether ANY rear lens can drive the flash — the torch is a device-level unit,
                 // so the UI may offer it even when the selected camera reports none.
@@ -1550,8 +1448,6 @@ class StreamingServerHelper(
                 put("snapshotRes", settings.snapshotRes)
                 put("motionDetectionEnabled", settings.motionDetectionEnabled)
                 put("motionSensitivity", settings.motionSensitivity)
-                // Motion detection is only exposed in the web UI when ONVIF is enabled.
-                put("onvifEnabled", settings.onvifEnabled)
             })
             put("appVersion", context.packageManager.getPackageInfo(context.packageName, 0).versionName.orEmpty())
         }.toString()
@@ -1559,7 +1455,7 @@ class StreamingServerHelper(
 
     private fun buildDeviceInfo(): DeviceInfo {
         val context = context
-        val idle = clients.isEmpty() && h264Clients.isEmpty()
+        val idle = clients.isEmpty()
         val cameraList = buildCameraInfoList(idle)
         // Gather per-camera stored settings from SharedPreferences. Keys use suffixes like
         // zoom_<cameraId>, exposure_<cameraId>, focus_<cameraId> which are already used
@@ -1694,13 +1590,15 @@ class StreamingServerHelper(
             resolution = prefs.getString("camera_resolution", "low") ?: "low",
             streamRes = prefs.getString("stream_res", "auto") ?: "auto",
             fps = prefs.getString("stream_fps", "30") ?: "30",
+            quality = prefs.getString("stream_quality", "85") ?: "85",
+            bitrate = prefs.getString("stream_bitrate", "0") ?: "0",
+            focusMode = prefs.getString("focus_mode", "continuous") ?: "continuous",
             torch = prefs.getString("camera_torch", "off") ?: "off",
             deviceHasFlash = anyBackCameraWithFlash(),
             audioGain = prefs.getString("audio_gain", "1.0") ?: "1.0",
             snapshotRes = prefs.getString("snapshot_res_$cameraId", "max") ?: "max",
             motionDetectionEnabled = prefs.getBoolean("motion_detection_enabled", false),
             motionSensitivity = prefs.getString("motion_sensitivity", "5") ?: "5",
-            onvifEnabled = prefs.getBoolean("rtsp_enabled", false),
         )
     }
 
@@ -1719,7 +1617,6 @@ class StreamingServerHelper(
     } catch (_: Throwable) { false }
 
     private fun buildCameraInfoList(idle: Boolean): List<InfoCamera> {
-        val encCaps = H264HardwareEncoder.caps()
         val cm = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
         return try {
             val sources = cameraInfoSources(cm)
@@ -1777,7 +1674,6 @@ class StreamingServerHelper(
                     } catch (_: Exception) {}
                 }
                 val sizes = set
-                    .filter { it.first <= encCaps.maxW && it.second <= encCaps.maxH }
                     .sortedByDescending { it.first * it.second }
                     .map { InfoSize(it.first, it.second) }
                 // Check both physical and logical characteristics for flash availability

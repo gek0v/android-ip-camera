@@ -188,6 +188,23 @@ class Camera1Capture(private val cameraId: Int, targetW: Int, targetH: Int) : Ca
         }
     }
 
+    override fun setFocusMode(mode: String) = live { p ->
+        val modes = p.supportedFocusModes ?: return@live
+        when (mode.lowercase()) {
+            "continuous" -> {
+                listOf(Camera.Parameters.FOCUS_MODE_CONTINUOUS_VIDEO, Camera.Parameters.FOCUS_MODE_CONTINUOUS_PICTURE)
+                    .firstOrNull { modes.contains(it) }?.let { p.focusMode = it }
+            }
+            "infinity" -> {
+                if (modes.contains(Camera.Parameters.FOCUS_MODE_INFINITY)) p.focusMode = Camera.Parameters.FOCUS_MODE_INFINITY
+            }
+            "macro" -> {
+                if (modes.contains(Camera.Parameters.FOCUS_MODE_MACRO)) p.focusMode = Camera.Parameters.FOCUS_MODE_MACRO
+            }
+            "auto" -> triggerAutoFocus()
+        }
+    }
+
     private fun live(block: (Camera.Parameters) -> Unit) {
         try { val p = camera.parameters; block(p); camera.parameters = p } catch (_: Exception) {}
     }

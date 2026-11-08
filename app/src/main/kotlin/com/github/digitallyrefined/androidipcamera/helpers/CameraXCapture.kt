@@ -406,17 +406,29 @@ class CameraXCapture(
     override fun setZoom(ratio: Float) { zoomRatio = ratio; applyZoomWithRetry(ratio) }
     @OptIn(ExperimentalCamera2Interop::class)
     override fun triggerAutoFocus() {
+        focusOnPoint(0.5f, 0.5f)
+    }
+
+    @OptIn(ExperimentalCamera2Interop::class)
+    override fun focusOnPoint(x: Float, y: Float) {
         try {
             val cam = camera ?: return
-            // Drop any manual-focus override, else the lingering CONTROL_AF_MODE_OFF
-            // defeats the AF scan below.
             manualFocus = null
             try { Camera2CameraControl.from(cam.cameraControl).clearCaptureRequestOptions() } catch (_: Exception) {}
-            val pt = SurfaceOrientedMeteringPointFactory(1f, 1f).createPoint(0.5f, 0.5f)
+            val pt = SurfaceOrientedMeteringPointFactory(1f, 1f).createPoint(x.coerceIn(0f, 1f), y.coerceIn(0f, 1f))
             cam.cameraControl.startFocusAndMetering(
                 FocusMeteringAction.Builder(pt, FocusMeteringAction.FLAG_AF or FocusMeteringAction.FLAG_AE)
-                    .setAutoCancelDuration(3, TimeUnit.SECONDS).build())
-        } catch (e: Exception) { Log.e(TAG, "AF: ${e.message}") }
+                    .setAutoCancelDuration(4, TimeUnit.SECONDS).build())
+        } catch (e: Exception) { Log.e(TAG, "focusOnPoint: ${e.message}") }
+    }
+
+    override fun setFocusMode(mode: String) {
+        when (mode.lowercase()) {
+            "continuous" -> setManualFocus(-1f)
+            "infinity" -> setManualFocus(0f)
+            "macro" -> setManualFocus(1f)
+            "auto" -> triggerAutoFocus()
+        }
     }
 
     /**

@@ -10,6 +10,7 @@ import androidx.camera.core.ImageProxy
 import androidx.preference.PreferenceManager
 import java.io.ByteArrayOutputStream
 import java.io.IOException
+import java.nio.charset.StandardCharsets
 import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.ThreadPoolExecutor
@@ -17,8 +18,9 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicLong
 
 /**
- * MJPEG streaming encoder implementation.
- * Handles JPEG compression, image transformations, and MJPEG streaming to clients.
+ * Ultra-low-latency MJPEG streaming encoder.
+ * Handles JPEG compression, adaptive bitrate control, image transformations,
+ * and immediate non-blocking distribution to HTTP MJPEG clients.
  */
 class MjpegStreamingEncoder(
     private val context: Context,
@@ -27,8 +29,12 @@ class MjpegStreamingEncoder(
 ) : StreamingEncoder {
     companion object {
         private const val TAG = "MjpegStreamingEncoder"
+        private val FRAME_HEADER_PREFIX = "--frame\r\nContent-Type: image/jpeg\r\nContent-Length: ".toByteArray(StandardCharsets.US_ASCII)
+        private val CRLF_CRLF = "\r\n\r\n".toByteArray(StandardCharsets.US_ASCII)
+        private val CRLF = "\r\n".toByteArray(StandardCharsets.US_ASCII)
     }
 
+    // Keep capacity tight (1 or 2 max) for ultra-low latency - never accumulate stale frames
     private val writerQueueCapacity = DeviceMemoryHelper.mjpegWriterQueueCapacity(context)
     private val writerGeneration = AtomicLong()
     private val networkWriter = ThreadPoolExecutor(
@@ -42,6 +48,10 @@ class MjpegStreamingEncoder(
 
     private var nv21Buffer: ByteArray? = null
     private var nv21RowBuffer: ByteArray? = null
+
+    // Closed-loop rate control for bitrate limit
+    @Volatile private var dynamicQuality = 85
+    @Volatile private var lastFrameBytes = 0
 
     private fun invalidatePendingWrites() {
         writerGeneration.incrementAndGet()
@@ -58,7 +68,39 @@ class MjpegStreamingEncoder(
     private var lastFrameTime = 0L
     private var captureRunning = false
 
+    /**
+     * Resolves JPEG quality based on user preferences and target bitrate.
+     * When bitrate limit is set (in kbps), adjusts dynamic quality adaptively to stay within budget.
+     */
+    private fun resolveQuality(prefs: android.content.SharedPreferences, fps: Int): Int {
+        val configuredQuality = prefs.getString("stream_quality", "85")?.toIntOrNull()
+            ?: DeviceMemoryHelper.defaultJpegQuality(context)
+        val bitrateKbps = prefs.getString("stream_bitrate", "0")?.toIntOrNull() ?: 0
+
+        if (bitrateKbps <= 0) {
+            // Unlimited bitrate: strictly honor configured quality (e.g. 95% for maximum quality)
+            return configuredQuality.coerceIn(10, 100)
+        }
+
+        // Target bytes per frame = (bitrateKbps * 1000 / 8) / fps
+        val targetFrameBytes = (bitrateKbps * 1000L / 8L) / fps.coerceAtLeast(1)
+
+        if (lastFrameBytes > 0) {
+            if (lastFrameBytes > targetFrameBytes * 1.05) {
+                val step = if (lastFrameBytes > targetFrameBytes * 1.3) 4 else 2
+                dynamicQuality = (dynamicQuality - step).coerceAtLeast(15)
+            } else if (lastFrameBytes < targetFrameBytes * 0.85 && dynamicQuality < configuredQuality) {
+                dynamicQuality = (dynamicQuality + 1).coerceAtMost(configuredQuality)
+            }
+        } else {
+            dynamicQuality = configuredQuality
+        }
+
+        return dynamicQuality.coerceIn(10, 100)
+    }
+
     override fun processFrame(image: ImageProxy) {
+        if (!hasClients()) return
         try {
             val prefs = PreferenceManager.getDefaultSharedPreferences(context)
             val fps = prefs.getString("stream_fps", "30")?.toIntOrNull() ?: 30
@@ -70,8 +112,6 @@ class MjpegStreamingEncoder(
             lastFrameTime = currentTime
 
             val camId = prefs.getString("camera_id", null)
-            // Rotation is controlled only by the per-camera rotate= setting; the camera's
-            // sensor orientation is intentionally ignored.
             val rotation = if (camId != null) {
                 val phys = camId.substringAfter(':', camId)
                 when {
@@ -100,12 +140,14 @@ class MjpegStreamingEncoder(
                     nv21RowBuffer = ByteArray(image.planes[0].rowStride)
                 }
             }
-            val quality = DeviceMemoryHelper.mjpegJpegQuality(context)
+
+            val quality = resolveQuality(prefs, fpsCoerced)
             var jpegBytes = convertNV21toJPEG(nv21, image.width, image.height, quality)
             val needsTransform = totalRotation != 0 || scaleFactor != 1.0f || contrastValue != 0 || mirror
             if (needsTransform) {
                 jpegBytes = applyTransformations(jpegBytes, totalRotation, scaleFactor, contrastValue, quality, mirror)
             }
+            lastFrameBytes = jpegBytes.size
             broadcastJpeg(jpegBytes)
         } catch (e: OutOfMemoryError) {
             handleOutOfMemory("processFrame")
@@ -149,12 +191,13 @@ class MjpegStreamingEncoder(
                 prefStringWithFallback(prefs, "mirror_$camId", "mirror_$phys")?.toBoolean() ?: false
             } else false
 
-            val quality = DeviceMemoryHelper.mjpegJpegQuality(context)
+            val quality = resolveQuality(prefs, fpsCoerced)
             var jpegBytes = convertNV21toJPEG(nv21, width, height, quality)
             val needsTransform = totalRotation != 0 || scaleFactor != 1.0f || contrastValue != 0 || mirror
             if (needsTransform) {
                 jpegBytes = applyTransformations(jpegBytes, totalRotation, scaleFactor, contrastValue, quality, mirror)
             }
+            lastFrameBytes = jpegBytes.size
             broadcastJpeg(jpegBytes)
         } catch (e: OutOfMemoryError) {
             handleOutOfMemory("processNv21Frame")
@@ -163,12 +206,10 @@ class MjpegStreamingEncoder(
         }
     }
 
-    // Latest JPEG sent to clients, so a "match stream" snapshot can reuse it without a camera rebind.
     @Volatile private var lastJpeg: ByteArray? = null
     @Volatile private var lastJpegAtMs: Long = 0L
     fun lastFrame(): ByteArray? = lastJpeg
 
-    /** Most recent streamed frame, but only if it's no older than [maxAgeMs] (0 = any age). */
     fun lastFrameFresh(maxAgeMs: Long): ByteArray? {
         val jpeg = lastJpeg ?: return null
         val age = System.currentTimeMillis() - lastJpegAtMs
@@ -183,31 +224,28 @@ class MjpegStreamingEncoder(
         if (clients.isEmpty()) return
         val generation = writerGeneration.get()
 
-        if (networkWriter.queue.remainingCapacity() == 0) {
-            return
+        // Ultra-low latency guarantee: drop stale waiting frame if writer is busy
+        while (networkWriter.queue.remainingCapacity() == 0) {
+            networkWriter.queue.poll()
         }
 
         try {
             networkWriter.execute {
                 if (generation != writerGeneration.get()) return@execute
                 val toRemove = mutableListOf<StreamingServerHelper.Client>()
+                val lengthBytes = jpegBytes.size.toString().toByteArray(StandardCharsets.US_ASCII)
+
                 clients.forEach { client ->
                     if (generation != writerGeneration.get()) return@forEach
                     try {
-                        client.writer.print("--frame\r\n")
-                        client.writer.print("Content-Type: image/jpeg\r\n")
-                        client.writer.print("Content-Length: ${jpegBytes.size}\r\n\r\n")
-                        client.writer.flush()
-                        client.outputStream.write(jpegBytes)
-                        client.outputStream.flush()
+                        val os = client.outputStream
+                        os.write(FRAME_HEADER_PREFIX)
+                        os.write(lengthBytes)
+                        os.write(CRLF_CRLF)
+                        os.write(jpegBytes)
+                        os.write(CRLF)
+                        os.flush()
                         client.markWriteSuccess()
-                    } catch (e: IOException) {
-                        try { client.socket.close() } catch (_: Exception) {}
-                        toRemove.add(client)
-                    } catch (e: java.net.SocketTimeoutException) {
-                        // Handle slow network - client is not reading fast enough
-                        try { client.socket.close() } catch (_: Exception) {}
-                        toRemove.add(client)
                     } catch (e: Exception) {
                         try { client.socket.close() } catch (_: Exception) {}
                         toRemove.add(client)
@@ -216,7 +254,7 @@ class MjpegStreamingEncoder(
                 toRemove.forEach { helper.removeClient(it) }
             }
         } catch (_: RejectedExecutionException) {
-            // Drop frame if rejected
+            // Drop frame on backpressure to prevent latency build up
         }
     }
 
@@ -234,27 +272,36 @@ class MjpegStreamingEncoder(
                         if (phys.isNotBlank() && phys != it) prefs.edit().putString("stream_scale_$phys", value).apply()
                     }
                     true
-                } else {
-                    false
-                }
+                } else false
             }
             "fps" -> {
                 val fps = value.toIntOrNull() ?: return false
                 if (fps in 1..60) {
                     prefs.edit().putString("stream_fps", value).apply()
                     true
-                } else {
-                    false
-                }
+                } else false
+            }
+            "quality" -> {
+                val q = value.toIntOrNull() ?: return false
+                if (q in 10..100) {
+                    prefs.edit().putString("stream_quality", value).apply()
+                    dynamicQuality = q
+                    true
+                } else false
+            }
+            "bitrate" -> {
+                val b = value.toIntOrNull() ?: return false
+                if (b >= 0) {
+                    prefs.edit().putString("stream_bitrate", value).apply()
+                    true
+                } else false
             }
             "audio_gain" -> {
                 val gain = value.toFloatOrNull() ?: return false
                 if (gain in 0.5f..3.0f) {
                     prefs.edit().putString("audio_gain", gain.toString()).apply()
                     true
-                } else {
-                    false
-                }
+                } else false
             }
             "contrast" -> {
                 val contrast = value.toIntOrNull() ?: return false
@@ -264,7 +311,6 @@ class MjpegStreamingEncoder(
                     val phys = it.substringAfter(':', it)
                     if (phys.isNotBlank() && phys != it) prefs.edit().putString("camera_contrast_$phys", contrast.toString()).apply()
                 }
-                Log.i(TAG, "Remote Control: Contrast set to $contrast (software-based)")
                 true
             }
             "mirror" -> {
@@ -276,9 +322,7 @@ class MjpegStreamingEncoder(
                         if (phys.isNotBlank() && phys != it) prefs.edit().putString("mirror_$phys", value).apply()
                     }
                     true
-                } else {
-                    false
-                }
+                } else false
             }
             else -> false
         }
@@ -297,7 +341,6 @@ class MjpegStreamingEncoder(
         return streamingServerHelper?.getClients()?.isNotEmpty() == true
     }
 
-    /** Called by [StreamingService] when Android reports low memory. */
     fun onMemoryPressure(severe: Boolean) {
         invalidatePendingWrites()
         lastJpeg = null
@@ -313,8 +356,7 @@ class MjpegStreamingEncoder(
         onMemoryPressure(severe = true)
         try {
             System.gc()
-        } catch (_: Exception) {
-        }
+        } catch (_: Exception) {}
     }
 
     private fun applyTransformations(
@@ -327,100 +369,59 @@ class MjpegStreamingEncoder(
     ): ByteArray {
         var bitmap: Bitmap? = null
         try {
-            val decodeOptions = BitmapFactory.Options().apply {
-                inPreferredConfig = if (DeviceMemoryHelper.isUnderMemoryPressure()) {
-                    Bitmap.Config.RGB_565
-                } else {
-                    Bitmap.Config.ARGB_8888
-                }
+            val options = BitmapFactory.Options().apply {
+                inPreferredConfig = Bitmap.Config.ARGB_8888
             }
-            bitmap = BitmapFactory.decodeByteArray(jpegBytes, 0, jpegBytes.size, decodeOptions)
-            if (bitmap != null) {
-                val matrix = Matrix()
+            bitmap = BitmapFactory.decodeByteArray(jpegBytes, 0, jpegBytes.size, options) ?: return jpegBytes
 
-                // Apply Mirror (horizontal flip) before rotation
-                if (mirror) {
-                    matrix.postScale(-1f, 1f)
-                    matrix.postTranslate(bitmap.width.toFloat(), 0f)
+            val matrix = Matrix()
+            if (mirror) matrix.postScale(-1f, 1f, bitmap.width / 2f, bitmap.height / 2f)
+            if (rotation != 0) matrix.postRotate(rotation.toFloat())
+            if (scaleFactor != 1.0f) matrix.postScale(scaleFactor, scaleFactor)
+
+            var transformedBitmap = if (!matrix.isIdentity) {
+                Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
+            } else {
+                bitmap
+            }
+
+            if (contrastValue != 0 && !DeviceMemoryHelper.isUnderMemoryPressure()) {
+                val contrastFactor = 1.0f + (contrastValue / 100.0f)
+                val colorMatrix = android.graphics.ColorMatrix().apply {
+                    set(floatArrayOf(
+                        contrastFactor, 0f, 0f, 0f, 0f,
+                        0f, contrastFactor, 0f, 0f, 0f,
+                        0f, 0f, contrastFactor, 0f, 0f,
+                        0f, 0f, 0f, 1f, 0f
+                    ))
                 }
-
-                // Apply Rotation
-                if (rotation != 0) {
-                    matrix.postRotate(rotation.toFloat())
+                val paint = android.graphics.Paint().apply {
+                    colorFilter = android.graphics.ColorMatrixColorFilter(colorMatrix)
                 }
-
-                // Apply Scaling
-                if (scaleFactor != 1.0f) {
-                    matrix.postScale(scaleFactor, scaleFactor)
-                }
-
-                // Create new bitmap with rotation and scaling applied
-                val transformedBitmap = Bitmap.createBitmap(
-                    bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true
+                val contrasted = Bitmap.createBitmap(
+                    transformedBitmap.width, transformedBitmap.height, Bitmap.Config.ARGB_8888
                 )
-
-                if (transformedBitmap != bitmap) {
-                    bitmap.recycle()
-                    bitmap = transformedBitmap
-                }
-
-                // Contrast allocates another full-size bitmap — skip under memory pressure.
-                if (contrastValue != 0 && !DeviceMemoryHelper.isUnderMemoryPressure()) {
-                    val contrastFactor = 1.0f + (contrastValue / 100.0f)
-
-                    val contrastColorMatrix = android.graphics.ColorMatrix().apply {
-                        set(floatArrayOf(
-                            contrastFactor, 0f, 0f, 0f, 0f,  // Red
-                            0f, contrastFactor, 0f, 0f, 0f,  // Green
-                            0f, 0f, contrastFactor, 0f, 0f,  // Blue
-                            0f, 0f, 0f, 1f, 0f               // Alpha
-                        ))
-                    }
-
-                    val paint = android.graphics.Paint().apply {
-                        colorFilter = android.graphics.ColorMatrixColorFilter(contrastColorMatrix)
-                    }
-
-                    val contrastedBitmap = Bitmap.createBitmap(
-                        bitmap.width, bitmap.height, bitmap.config ?: Bitmap.Config.ARGB_8888
-                    )
-                    val canvas = android.graphics.Canvas(contrastedBitmap)
-                    canvas.drawBitmap(bitmap, 0f, 0f, paint)
-
-                    bitmap.recycle()
-                    bitmap = contrastedBitmap
-                }
-
-                // Convert back to JPEG bytes
-                val outputStream = ByteArrayOutputStream()
-                bitmap.compress(Bitmap.CompressFormat.JPEG, jpegQuality, outputStream)
-                val result = outputStream.toByteArray()
-                bitmap.recycle()
-                bitmap = null
-                outputStream.close()
-                return result
+                val canvas = android.graphics.Canvas(contrasted)
+                canvas.drawBitmap(transformedBitmap, 0f, 0f, paint)
+                if (transformedBitmap !== bitmap) transformedBitmap.recycle()
+                transformedBitmap = contrasted
             }
+
+            val outStream = ByteArrayOutputStream()
+            transformedBitmap.compress(Bitmap.CompressFormat.JPEG, jpegQuality, outStream)
+            val result = outStream.toByteArray()
+
+            if (transformedBitmap !== bitmap) transformedBitmap.recycle()
+            bitmap.recycle()
+            return result
         } catch (e: OutOfMemoryError) {
-            handleOutOfMemory("applyTransformations")
-        } catch (e: Exception) {
-            Log.e(TAG, "Error transforming image: ${e.message}")
-            // Continue with original image if transforming image fails
-        } finally {
             bitmap?.recycle()
+            handleOutOfMemory("applyTransformations")
+            return jpegBytes
+        } catch (e: Exception) {
+            bitmap?.recycle()
+            Log.e(TAG, "applyTransformations error: ${e.message}")
+            return jpegBytes
         }
-        return jpegBytes
-    }
-
-    /**
-     * Check if MJPEG encoder is running.
-     */
-    fun isRunning(): Boolean = captureRunning
-
-    /**
-     * Update the streaming server helper reference (called after server initialization).
-     */
-    fun updateServerHelper(helper: StreamingServerHelper) {
-        invalidatePendingWrites()
-        streamingServerHelper = helper
     }
 }
