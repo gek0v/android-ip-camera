@@ -111,6 +111,17 @@ class CameraXCapture(
     @Volatile private var exposureIndex: Int? = null
     // Cached manual focus (0f..1f) so it can be re-applied after an async (re)bind; null = autofocus.
     @Volatile private var manualFocus: Float? = null
+    @Volatile private var cropRegion: android.graphics.Rect? = null
+    override val sensorActiveArraySize: android.graphics.Rect? by lazy {
+        try {
+            val cm = ctx.getSystemService(Context.CAMERA_SERVICE) as CameraManager
+            val want = if (front) CameraCharacteristics.LENS_FACING_FRONT else CameraCharacteristics.LENS_FACING_BACK
+            val id = logicalCameraId?.takeIf { it in cm.cameraIdList }
+                ?: cm.cameraIdList.firstOrNull { cm.getCameraCharacteristics(it).get(CameraCharacteristics.LENS_FACING) == want }
+                ?: cm.cameraIdList.firstOrNull()
+            if (id != null) cm.getCameraCharacteristics(id).get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE) else null
+        } catch (_: Exception) { null }
+    }
     private val main = ContextCompat.getMainExecutor(ctx)
     private val analysisExec = Executors.newSingleThreadExecutor()
 
@@ -338,7 +349,7 @@ class CameraXCapture(
         if (torchEnabled && hasFlashUnit) try { cc?.enableTorch(true) } catch (_: Exception) {}
         zoomRatio?.let { applyZoomWithRetry(it) }
         exposureIndex?.let { try { cc?.setExposureCompensationIndex(it) } catch (_: Exception) {} }
-        manualFocus?.let { setManualFocus(it) }
+        applyCamera2Options()
     }
 
     /**
@@ -476,11 +487,50 @@ class CameraXCapture(
     }
 
     @OptIn(ExperimentalCamera2Interop::class)
+    private fun applyCamera2Options() {
+        val cam = camera ?: return
+        try {
+            val c2 = Camera2CameraControl.from(cam.cameraControl)
+            val builder = CaptureRequestOptions.Builder()
+            var hasOptions = false
+            val norm = manualFocus
+            if (norm != null) {
+                val minDist = try {
+                    Camera2CameraInfo.from(cam.cameraInfo)
+                        .getCameraCharacteristic(CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE) ?: 0f
+                } catch (_: Exception) { 0f }
+                builder.setCaptureRequestOption(
+                    CaptureRequest.CONTROL_AF_MODE, CameraMetadata.CONTROL_AF_MODE_OFF)
+                builder.setCaptureRequestOption(
+                    CaptureRequest.LENS_FOCUS_DISTANCE, norm * minDist)
+                hasOptions = true
+            }
+            val crop = cropRegion
+            if (crop != null) {
+                builder.setCaptureRequestOption(CaptureRequest.SCALER_CROP_REGION, crop)
+                hasOptions = true
+            }
+            if (hasOptions) {
+                c2.captureRequestOptions = builder.build()
+            } else {
+                c2.clearCaptureRequestOptions()
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "applyCamera2Options: " + e.message)
+        }
+    }
+
+    @OptIn(ExperimentalCamera2Interop::class)
+    override fun setCropRegion(rect: android.graphics.Rect?) {
+        cropRegion = rect
+        applyCamera2Options()
+    }
+
     override fun focusOnPoint(x: Float, y: Float) {
         try {
             val cam = camera ?: return
             manualFocus = null
-            try { Camera2CameraControl.from(cam.cameraControl).clearCaptureRequestOptions() } catch (_: Exception) {}
+            applyCamera2Options()
             val pt = SurfaceOrientedMeteringPointFactory(1f, 1f).createPoint(x.coerceIn(0f, 1f), y.coerceIn(0f, 1f))
             cam.cameraControl.startFocusAndMetering(
                 FocusMeteringAction.Builder(pt, FocusMeteringAction.FLAG_AF or FocusMeteringAction.FLAG_AE)
@@ -504,27 +554,9 @@ class CameraXCapture(
      */
     @OptIn(ExperimentalCamera2Interop::class)
     override fun setManualFocus(distance: Float) {
-        val cam = camera ?: run { manualFocus = distance.takeIf { it >= 0f }; return }
-        try {
-            val c2 = Camera2CameraControl.from(cam.cameraControl)
-            if (distance < 0f) {
-                // Clear the override so CameraX resumes its own continuous AF.
-                manualFocus = null
-                c2.clearCaptureRequestOptions()
-                return
-            }
-            val norm = distance.coerceIn(0f, 1f)
-            manualFocus = norm
-            // Nearest focus in diopters; 0f (fixed-focus lens) leaves us at infinity, which is fine.
-            val minDist = Camera2CameraInfo.from(cam.cameraInfo)
-                .getCameraCharacteristic(CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE) ?: 0f
-            c2.captureRequestOptions = CaptureRequestOptions.Builder()
-                .setCaptureRequestOption(
-                    CaptureRequest.CONTROL_AF_MODE, CameraMetadata.CONTROL_AF_MODE_OFF)
-                .setCaptureRequestOption(
-                    CaptureRequest.LENS_FOCUS_DISTANCE, norm * minDist)
-                .build()
-        } catch (e: Exception) { Log.e(TAG, "manualFocus: ${e.message}") }
+        val norm = if (distance < 0f) null else distance.coerceIn(0f, 1f)
+        manualFocus = norm
+        applyCamera2Options()
     }
 
     /** The camera's WIDEST advertised AE FPS range — leaves auto-exposure fully free while giving legacy
