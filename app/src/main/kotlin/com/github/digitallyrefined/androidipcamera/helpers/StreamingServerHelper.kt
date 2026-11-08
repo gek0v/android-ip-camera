@@ -126,7 +126,19 @@ class StreamingServerHelper(
     /** Base delay between bind retries (exponential backoff: 200, 400, 800, 1600, 3200 ms). */
     private val SOCKET_BIND_RETRY_DELAY_MS = 200L
 
+    val webSocketHelper = BinaryWebSocketHelper(
+        onLog = onLog,
+        onClientConnected = onClientConnected,
+        onClientDisconnected = onClientDisconnected,
+        onControlCommand = onControlCommand
+    )
+
     fun getClients(): List<Client> = clients.toList()
+    fun hasWebSocketClients(): Boolean = webSocketHelper.hasClients()
+    fun getWebSocketClients(): List<WebSocketClient> = webSocketHelper.getClients()
+    fun broadcastWebSocketFrame(jpegBytes: ByteArray, timestamp: Long = System.currentTimeMillis(), flags: Short = 0) {
+        webSocketHelper.broadcastVideoFrame(jpegBytes, timestamp, flags)
+    }
 
     private fun parseQueryParams(uri: String): Map<String, String> {
         val query = uri.substringAfter("?", missingDelimiterValue = "")
@@ -199,6 +211,7 @@ class StreamingServerHelper(
             serverSocket = null
         }
         closeClientConnection()
+        webSocketHelper.closeAll()
     }
 
     /**
@@ -644,7 +657,7 @@ class StreamingServerHelper(
             }
 
             if (!isStreamingEnabled() &&
-                (path.startsWith("/video") || path == "/audio" || path == "/audio/raw" || path == "/audio/upload")
+                (path.startsWith("/video") || path.startsWith("/ws") || path == "/audio" || path == "/audio/raw" || path == "/audio/upload")
             ) {
                 writer.print("HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\n\r\n")
                 writer.print("Streaming is disabled. POST /control/start to re-enable.\r\n")
@@ -889,6 +902,52 @@ class StreamingServerHelper(
                 writer.print("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n")
                 writer.print(info.toJsonString()); writer.flush()
                 try { socket.close() } catch (_: Exception) {}
+                return
+            }
+
+            val isWsPath = path == "/ws/video" || path == "/video/ws" || path == "/ws/obs" || path == "/obs/ws"
+            val isWsUpgrade = BinaryWebSocketHelper.isWebSocketUpgrade(headers)
+
+            if (isWsPath || isWsUpgrade) {
+                if (!isWsUpgrade && (path == "/ws/obs" || path == "/obs/ws")) {
+                    val obsHtml = BinaryWebSocketHelper.getObsWebSocketHtml()
+                    val obsBytes = obsHtml.toByteArray(StandardCharsets.UTF_8)
+                    writer.print("HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: " + obsBytes.size + "\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n")
+                    writer.flush()
+                    outputStream.write(obsBytes)
+                    outputStream.flush()
+                    try { socket.close() } catch (_: Exception) {}
+                    return
+                }
+
+                if (!isWsUpgrade) {
+                    writer.print("HTTP/1.1 426 Upgrade Required\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\nWebSocket upgrade required.\r\n")
+                    writer.flush()
+                    try { socket.close() } catch (_: Exception) {}
+                    return
+                }
+
+                if (handleMaxClients(socket, isAuthenticated = enableAuth)) return
+
+                try {
+                    socket.tcpNoDelay = true
+                    socket.sendBufferSize = 64 * 1024
+                } catch (_: Exception) {}
+
+                val handshakeSuccess = webSocketHelper.handleHandshake(headers, outputStream)
+                if (!handshakeSuccess) {
+                    writer.print("HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\nMissing or invalid Sec-WebSocket-Key\r\n")
+                    writer.flush()
+                    try { socket.close() } catch (_: Exception) {}
+                    return
+                }
+
+                val wsClient = webSocketHelper.registerClient(socket, outputStream, isAuthenticated = enableAuth)
+                try {
+                    webSocketHelper.runClientReader(wsClient)
+                } finally {
+                    webSocketHelper.removeClient(wsClient)
+                }
                 return
             }
 
@@ -1219,7 +1278,7 @@ class StreamingServerHelper(
 
     fun handleMaxClients(socket: Socket, isAuthenticated: Boolean = false): Boolean {
         val maxAllowed = if (isAuthenticated) maxAuthenticatedClients else maxClients
-        if (clients.size >= maxAllowed) {
+        if (clients.size + webSocketHelper.clientCount() >= maxAllowed) {
             socket.getOutputStream().writer().use { writer ->
                 writer.write("HTTP/1.1 503 Service Unavailable\r\n")
                 writer.write("Retry-After: 30\r\n") // 30 seconds
@@ -1345,6 +1404,7 @@ class StreamingServerHelper(
     }
 
     fun closeClientConnection() {
+        webSocketHelper.closeAll()
         val clientsToClose = clients.toList()
         val audioClientsToClose = audioClients.toList()
         clients.clear()

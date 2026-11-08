@@ -329,6 +329,10 @@ class MjpegStreamingEncoder(
         lastJpeg = jpegBytes
         lastJpegAtMs = System.currentTimeMillis()
         val helper = streamingServerHelper ?: return
+
+        // Distribute to WebSocket clients concurrently with zero-blocking backpressure
+        helper.broadcastWebSocketFrame(jpegBytes, lastJpegAtMs)
+
         val clients = helper.getClients()
         if (clients.isEmpty()) return
         val generation = writerGeneration.get()
@@ -466,7 +470,8 @@ class MjpegStreamingEncoder(
     }
 
     override fun hasClients(): Boolean {
-        return streamingServerHelper?.getClients()?.isNotEmpty() == true
+        val helper = streamingServerHelper ?: return false
+        return helper.getClients().isNotEmpty() || helper.hasWebSocketClients()
     }
 
     fun onMemoryPressure(severe: Boolean) {
