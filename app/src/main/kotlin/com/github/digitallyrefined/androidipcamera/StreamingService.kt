@@ -71,6 +71,28 @@ class StreamingService : LifecycleService() {
     private fun motionEnabled(): Boolean = motionMonitor?.enabled == true
 
     @Volatile private var backend: CaptureBackend? = null
+    val eptzController = EptzController()
+
+    fun applyEptzCrop() {
+        val b = backend ?: return
+        val sensorRect = b.sensorActiveArraySize
+        val sensorW = sensorRect?.width() ?: b.width
+        val sensorH = sensorRect?.height() ?: b.height
+        val aspect = if (b.height > 0) b.width.toFloat() / b.height.toFloat() else 16f / 9f
+        val crop = eptzController.calculateCropRect(sensorW, sensorH, aspect)
+        val androidRect = crop.toAndroidRect()
+        val finalRect = if (sensorRect != null && (sensorRect.left != 0 || sensorRect.top != 0)) {
+            android.graphics.Rect(
+                sensorRect.left + androidRect.left,
+                sensorRect.top + androidRect.top,
+                sensorRect.left + androidRect.right,
+                sensorRect.top + androidRect.bottom
+            )
+        } else {
+            androidRect
+        }
+        b.setCropRegion(finalRect)
+    }
     @Volatile private var captureRunning = false
     @Volatile private var cameraHeldForTorch = false
     @Volatile private var deviceTorchOn = false
@@ -829,6 +851,32 @@ class StreamingService : LifecycleService() {
             }
             "focus_trigger" -> {
                 launchMain { backend?.triggerAutoFocus() }
+            }
+            "eptz_pan" -> {
+                val p = value.toFloatOrNull() ?: return
+                eptzController.setPan(p)
+                launchMain { applyEptzCrop() }
+            }
+            "eptz_tilt" -> {
+                val t = value.toFloatOrNull() ?: return
+                eptzController.setTilt(t)
+                launchMain { applyEptzCrop() }
+            }
+            "eptz_zoom" -> {
+                val z = value.toFloatOrNull() ?: return
+                eptzController.setZoom(z)
+                launchMain { applyEptzCrop() }
+            }
+            "eptz_reset" -> {
+                eptzController.reset()
+                launchMain { applyEptzCrop() }
+            }
+            "eptz_autoframing" -> {
+                val parts = value.split(",").mapNotNull { it.trim().toFloatOrNull() }
+                if (parts.size == 4) {
+                    val changed = eptzController.autoFrame(parts[0], parts[1], parts[2], parts[3])
+                    if (changed) launchMain { applyEptzCrop() }
+                }
             }
             "focus_point" -> {
                 val parts = value.split(",")
