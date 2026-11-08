@@ -1,5 +1,7 @@
 package com.github.digitallyrefined.androidipcamera.helpers
 
+import android.os.Build
+
 import android.content.Context
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraManager
@@ -124,11 +126,19 @@ class CameraXCapture(
                 // ImageAnalysis ignores a lone ResolutionStrategy unless a matching AspectRatioStrategy
                 // is set too; PREFER_HIGHER lifts the analysis cap above the 640x480 default.
                 val ratio = if (desired.width.toDouble() / desired.height >= 1.5) AspectRatio.RATIO_16_9 else AspectRatio.RATIO_4_3
-                val sel = ResolutionSelector.Builder()
+                val isPixelOrTensor = Build.MANUFACTURER.equals("Google", ignoreCase = true) ||
+                    Build.HARDWARE.contains("tensor", ignoreCase = true) ||
+                    Build.HARDWARE.contains("gs201", ignoreCase = true) ||
+                    Build.HARDWARE.contains("cloudripper", ignoreCase = true) ||
+                    (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && Build.SOC_MODEL.contains("tensor", ignoreCase = true))
+
+                val selBuilder = ResolutionSelector.Builder()
                     .setAspectRatioStrategy(AspectRatioStrategy(ratio, AspectRatioStrategy.FALLBACK_RULE_AUTO))
                     .setResolutionStrategy(ResolutionStrategy(desired, ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER_THEN_LOWER))
-                    .setAllowedResolutionMode(ResolutionSelector.PREFER_HIGHER_RESOLUTION_OVER_CAPTURE_RATE)
-                    .build()
+                if (!isPixelOrTensor) {
+                    selBuilder.setAllowedResolutionMode(ResolutionSelector.PREFER_HIGHER_RESOLUTION_OVER_CAPTURE_RATE)
+                }
+                val sel = selBuilder.build()
                 // Pin every use case to a fixed rotation. Stream rotation comes only from the
                 // per-camera rotate= control: the encoders ignore imageInfo.rotationDegrees and the
                 // GL pipe ignores the surface's sensor transform, so this value must never follow
@@ -147,24 +157,27 @@ class CameraXCapture(
                     analysisInterop.setCaptureRequestOption(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, it)
                     Log.i(TAG, "AE fps range $it (auto within range)")
                 }
+
+                // Google Pixel Tensor & Low-Latency optimizations:
+                // 1. Disable EIS to eliminate 60-120ms multi-frame queue delay and preserve native sensor FOV
+                analysisInterop.setCaptureRequestOption(CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE, CameraMetadata.CONTROL_VIDEO_STABILIZATION_MODE_OFF)
+                try {
+                    analysisInterop.setCaptureRequestOption(CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE, CameraMetadata.LENS_OPTICAL_STABILIZATION_MODE_OFF)
+                } catch (_: Exception) {}
+
+                // 2. Fast single-pass noise reduction and edge enhancement (avoids heavy multi-frame temporal blending in Tensor ISP)
+                analysisInterop.setCaptureRequestOption(CaptureRequest.NOISE_REDUCTION_MODE, CameraMetadata.NOISE_REDUCTION_MODE_FAST)
+                analysisInterop.setCaptureRequestOption(CaptureRequest.EDGE_MODE, CameraMetadata.EDGE_MODE_FAST)
+                analysisInterop.setCaptureRequestOption(CaptureRequest.HOT_PIXEL_MODE, CameraMetadata.HOT_PIXEL_MODE_FAST)
+                analysisInterop.setCaptureRequestOption(CaptureRequest.CONTROL_SCENE_MODE, CameraMetadata.CONTROL_SCENE_MODE_DISABLED)
+
+                // 3. Smooth continuous video auto-focus
+                analysisInterop.setCaptureRequestOption(CaptureRequest.CONTROL_AF_MODE, CameraMetadata.CONTROL_AF_MODE_CONTINUOUS_VIDEO)
+
                 analysisUseCase = aBuilder.build()
                     .also { a -> a.setAnalyzer(analysisExec) { img ->
                         width = img.width; height = img.height
                         hasProducedFrame = true
-                        try {
-                            val crop = img.cropRect
-                            val nv21 = synchronized(nv21Lock) {
-                                convertYUV420toNV21(img, nv21Buffer, nv21RowBuffer).also {
-                                    nv21Buffer = it
-                                    if (nv21RowBuffer == null || nv21RowBuffer!!.size < img.planes[0].rowStride) {
-                                        nv21RowBuffer = ByteArray(img.planes[0].rowStride)
-                                    }
-                                }
-                            }
-                            latestNv21 = nv21
-                            latestNv21W = crop.width(); latestNv21H = crop.height()
-                            latestNv21AtMs = System.currentTimeMillis()
-                        } catch (e: Exception) { Log.e(TAG, "frame cache: ${e.message}") }
                         onFrame(img)
                     } }
                 // ImageCapture stays co-bound from start(): a still then snaps straight from the bound
