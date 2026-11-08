@@ -22,3 +22,10 @@ _wsl_*.sh
 
 # Git worktrees
 .worktrees/
+
+# NDK / CMake intermediate build folder
+.cxx/
+app/.cxx/
+
+# Agent session
+.pi/

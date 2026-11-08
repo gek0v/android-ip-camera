@@ -25,6 +25,20 @@ android {
 
         // https://f-droid.org/docs/Reproducible_Builds/#pngs-generated-from-vector-drawables
         vectorDrawables.generatedDensities = []
+
+        externalNativeBuild {
+            cmake {
+                cppFlags "-O3"
+                abiFilters "armeabi-v7a", "arm64-v8a", "x86", "x86_64"
+            }
+        }
+    }
+
+    externalNativeBuild {
+        cmake {
+            path "src/main/cpp/CMakeLists.txt"
+            version "3.22.1"
+        }
     }
 
     // https://f-droid.org/docs/Reproducible_Builds/#png-crushcrunch
