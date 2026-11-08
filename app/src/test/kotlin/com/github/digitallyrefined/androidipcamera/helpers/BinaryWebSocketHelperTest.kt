@@ -230,4 +230,38 @@ class BinaryWebSocketHelperTest {
             assertEquals(encodedStandard, encodedPure)
         }
     }
+
+    @Test
+    fun testChannelRegistrationAndSegregation() {
+        val helper = BinaryWebSocketHelper()
+        val mockSocketPrimary = java.net.Socket()
+        val mockSocketSecondary = java.net.Socket()
+        val outStreamPrimary = java.io.ByteArrayOutputStream()
+        val outStreamSecondary = java.io.ByteArrayOutputStream()
+
+        val primaryClient = helper.registerClient(mockSocketPrimary, outStreamPrimary, isAuthenticated = true, channel = "primary")
+        val secondaryClient = helper.registerClient(mockSocketSecondary, outStreamSecondary, isAuthenticated = true, channel = "secondary")
+
+        assertEquals("primary", primaryClient.streamChannel)
+        assertEquals("secondary", secondaryClient.streamChannel)
+
+        assertTrue(helper.hasClientsForChannel("primary"))
+        assertTrue(helper.hasClientsForChannel("secondary"))
+        assertFalse(helper.hasClientsForChannel("auxiliary"))
+
+        helper.removeClient(primaryClient)
+        assertFalse(helper.hasClientsForChannel("primary"))
+        assertTrue(helper.hasClientsForChannel("secondary"))
+
+        helper.removeClient(secondaryClient)
+        assertFalse(helper.hasClientsForChannel("secondary"))
+    }
+
+    @Test
+    fun testObsWebSocketHtmlSupportsDualCameras() {
+        val html = BinaryWebSocketHelper.getObsWebSocketHtml()
+        assertTrue(html.contains("/ws/secondary"))
+        assertTrue(html.contains("/ws/video"))
+        assertTrue(html.contains("cam"))
+    }
 }

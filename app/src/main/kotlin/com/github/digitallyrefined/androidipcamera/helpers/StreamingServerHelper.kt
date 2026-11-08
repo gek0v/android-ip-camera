@@ -67,7 +67,8 @@ class StreamingServerHelper(
         val isAuthenticated: Boolean = false,
         @Volatile var lastSuccessfulWriteMs: Long = System.currentTimeMillis(),
         @Volatile var isWriting: Boolean = false,
-        @Volatile var droppedFrames: Long = 0L
+        @Volatile var droppedFrames: Long = 0L,
+        val streamChannel: String = "primary"
     ) {
         fun markWriteStart() {
             isWriting = true
@@ -150,10 +151,16 @@ class StreamingServerHelper(
     val eptzPresetManager = EptzPresetManager(context)
 
     fun getClients(): List<Client> = clients.toList()
+    fun getPrimaryClients(): List<Client> = clients.filter { it.streamChannel == "primary" }
+    fun getSecondaryClients(): List<Client> = clients.filter { it.streamChannel == "secondary" }
+    fun hasSecondaryClients(): Boolean = clients.any { it.streamChannel == "secondary" } || webSocketHelper.hasClientsForChannel("secondary")
     fun hasWebSocketClients(): Boolean = webSocketHelper.hasClients()
     fun getWebSocketClients(): List<WebSocketClient> = webSocketHelper.getClients()
-    fun broadcastWebSocketFrame(jpegBytes: ByteArray, timestamp: Long = System.currentTimeMillis(), flags: Short = 0) {
-        webSocketHelper.broadcastVideoFrame(jpegBytes, timestamp, flags)
+    fun broadcastWebSocketFrame(jpegBytes: ByteArray, timestamp: Long = System.currentTimeMillis(), flags: Short = 0, channel: String = "primary") {
+        webSocketHelper.broadcastVideoFrame(jpegBytes, timestamp, flags, channel)
+    }
+    fun broadcastSecondaryWebSocketFrame(jpegBytes: ByteArray, timestamp: Long = System.currentTimeMillis(), flags: Short = 0) {
+        webSocketHelper.broadcastVideoFrame(jpegBytes, timestamp, flags, "secondary")
     }
 
     private fun parseQueryParams(uri: String): Map<String, String> {
@@ -1042,11 +1049,12 @@ class StreamingServerHelper(
                 return
             }
 
-            val isWsPath = path == "/ws/video" || path == "/video/ws" || path == "/ws/obs" || path == "/obs/ws"
+            val isWsPath = path == "/ws/video" || path == "/video/ws" || path == "/ws/obs" || path == "/obs/ws" ||
+                    path == "/ws/secondary" || path == "/ws/front" || path == "/ws/back" || path == "/secondary/ws"
             val isWsUpgrade = BinaryWebSocketHelper.isWebSocketUpgrade(headers)
 
             if (isWsPath || isWsUpgrade) {
-                if (!isWsUpgrade && (path == "/ws/obs" || path == "/obs/ws")) {
+                if (!isWsUpgrade && (path == "/ws/obs" || path == "/obs/ws" || path.startsWith("/ws/obs"))) {
                     val obsHtml = BinaryWebSocketHelper.getObsWebSocketHtml()
                     val obsBytes = obsHtml.toByteArray(StandardCharsets.UTF_8)
                     writer.print("HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: " + obsBytes.size + "\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n")
@@ -1079,7 +1087,12 @@ class StreamingServerHelper(
                     return
                 }
 
-                val wsClient = webSocketHelper.registerClient(socket, outputStream, isAuthenticated = enableAuth)
+                val queryParams = parseQueryParams(uri)
+                val cam = queryParams["cam"]?.lowercase() ?: queryParams["camera"]?.lowercase()
+                val isSec = path.contains("secondary") || path.contains("front") || (cam in listOf("front", "secondary", "sec", "1"))
+                val streamChannel = if (isSec) "secondary" else "primary"
+
+                val wsClient = webSocketHelper.registerClient(socket, outputStream, isAuthenticated = enableAuth, channel = streamChannel)
                 try {
                     webSocketHelper.runClientReader(wsClient)
                 } finally {
@@ -1088,13 +1101,17 @@ class StreamingServerHelper(
                 return
             }
 
-            if (path == "/obs" || path == "/view") {
+            if (path == "/obs" || path == "/view" || path == "/obs/front" || path == "/obs/back" || path == "/obs/secondary") {
                 val queryParams = parseQueryParams(uri)
                 val fit = queryParams["fit"]?.takeIf { it in listOf("contain", "cover", "fill") } ?: "contain"
                 val rotate = queryParams["rotate"]?.toIntOrNull() ?: 0
                 val flip = queryParams["flip"]?.lowercase()
 
-                // Preserve auth and other query parameters for the /video/mjpeg stream element
+                val cam = queryParams["cam"]?.lowercase() ?: queryParams["camera"]?.lowercase()
+                val isSec = path.contains("front") || path.contains("secondary") || (cam in listOf("front", "secondary", "sec", "1"))
+                val mjpegSrc = if (isSec) "/video/secondary" else "/video/mjpeg"
+
+                // Preserve auth and other query parameters for the stream element
                 val imgQuery = if (uri.contains("?")) "?" + uri.substringAfter("?") else ""
 
                 val transformStyle = buildString {
@@ -1109,7 +1126,7 @@ class StreamingServerHelper(
                     if (transformStyle.isNotEmpty()) append("transform:${transformStyle};")
                 }
 
-                val obsHtml = "<!DOCTYPE html><html><head><meta charset=\"utf-8\"><title>OBS Stream</title><style>html,body{margin:0;padding:0;width:100%;height:100%;background:#000;overflow:hidden;display:flex;align-items:center;justify-content:center;}img{${imgStyle}}</style></head><body><img src=\"/video/mjpeg${imgQuery}\" alt=\"Stream\"></body></html>"
+                val obsHtml = "<!DOCTYPE html><html><head><meta charset=\"utf-8\"><title>OBS Stream (${if (isSec) "Front" else "Main"})</title><style>html,body{margin:0;padding:0;width:100%;height:100%;background:#000;overflow:hidden;display:flex;align-items:center;justify-content:center;}img{${imgStyle}}</style></head><body><img src=\"${mjpegSrc}${imgQuery}\" alt=\"Stream\"></body></html>"
                 val obsBytes = obsHtml.toByteArray(StandardCharsets.UTF_8)
                 writer.print("HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: " + obsBytes.size + "\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Headers: *\r\nCache-Control: no-cache, no-store, must-revalidate\r\nConnection: close\r\n\r\n")
                 writer.flush()
@@ -1119,15 +1136,23 @@ class StreamingServerHelper(
                 return
             }
 
-            if (path == "/video/mjpeg" || path == "/video" || path == "/mjpeg") {
+            val isPrimaryMjpeg = path == "/video/mjpeg" || path == "/video" || path == "/mjpeg" || path == "/video/primary" || path == "/video/back"
+            val isSecondaryMjpeg = path == "/video/secondary" || path == "/video/front" || path == "/video/sec.mjpeg"
+
+            if (isPrimaryMjpeg || isSecondaryMjpeg) {
                 // AUTHENTICATED CONNECTION if auth is enabled - No rate limiting, higher connection limits
                 if (handleMaxClients(socket, isAuthenticated = enableAuth)) return
+
+                val queryParams = parseQueryParams(uri)
+                val cam = queryParams["cam"]?.lowercase() ?: queryParams["camera"]?.lowercase()
+                val isSec = isSecondaryMjpeg || (cam in listOf("front", "secondary", "sec", "1"))
+                val streamChannel = if (isSec) "secondary" else "primary"
 
                 val tuning = SocketTuningHelper.tuneStreamingSocket(socket)
                 try {
                     socket.sendBufferSize = 256 * 1024
                 } catch (_: Exception) {}
-                onLog("Streaming socket tuned for " + clientIp + ": tcpNoDelay=" + tuning.tcpNoDelayApplied + ", lowat=" + tuning.tcpNotSentLowatApplied)
+                onLog("Streaming socket ($streamChannel) tuned for " + clientIp + ": tcpNoDelay=" + tuning.tcpNoDelayApplied + ", lowat=" + tuning.tcpNotSentLowatApplied)
 
                 // Send HTTP response headers for MJPEG stream
                 writer.print("HTTP/1.1 200 OK\r\n")
@@ -1141,7 +1166,12 @@ class StreamingServerHelper(
                 writer.flush()
 
                 // Add client to list - frames will be sent from MjpegStreamingEncoder
-                val client = Client(socket, outputStream, writer, System.currentTimeMillis(), isAuthenticated = enableAuth)
+                val client = Client(
+                    socket, outputStream, writer,
+                    System.currentTimeMillis(),
+                    isAuthenticated = enableAuth,
+                    streamChannel = streamChannel
+                )
                 val accepted = synchronized(this) {
                     if (generation != serverGeneration) false
                     else { clients.add(client); true }
@@ -1626,6 +1656,7 @@ class StreamingServerHelper(
         val pipEnabled: Boolean,
         val pipPosition: String,
         val pipSize: String,
+        val dualStreamMode: String = "separate",
         val hasConcurrentCameras: Boolean = false,
     )
 
@@ -1700,6 +1731,7 @@ class StreamingServerHelper(
                 put("pipEnabled", settings.pipEnabled)
                 put("pipPosition", settings.pipPosition)
                 put("pipSize", settings.pipSize)
+                put("dualStreamMode", settings.dualStreamMode)
                 put("hasConcurrentCameras", settings.hasConcurrentCameras)
             })
             put("hasConcurrentCameras", settings.hasConcurrentCameras)
@@ -1857,6 +1889,7 @@ class StreamingServerHelper(
             pipEnabled = prefs.getBoolean("pip_enabled", false),
             pipPosition = prefs.getString("pip_position", "top-right") ?: "top-right",
             pipSize = prefs.getString("pip_size", "0.28") ?: "0.28",
+            dualStreamMode = prefs.getString("dual_stream_mode", "separate") ?: "separate",
             hasConcurrentCameras = hasConcurrentCameraSupport(context),
         )
     }

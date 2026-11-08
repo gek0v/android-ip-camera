@@ -59,7 +59,8 @@ class WebSocketClient(
     val socket: Socket,
     val outputStream: OutputStream,
     val isAuthenticated: Boolean = false,
-    val connectedAt: Long = System.currentTimeMillis()
+    val connectedAt: Long = System.currentTimeMillis(),
+    val streamChannel: String = "primary"
 ) {
     val isWriting = AtomicBoolean(false)
     @Volatile var lastActiveMs: Long = System.currentTimeMillis()
@@ -211,7 +212,11 @@ class BinaryWebSocketHelper(
                 """const canvas=document.getElementById('c'),ctx=canvas.getContext('2d',{alpha:false,desynchronized:true});""" +
                 """let ws,proto=location.protocol==='https:'?'wss:':'ws:';""" +
                 """function connect(){""" +
-                """ws=new WebSocket(proto+'//'+location.host+'/ws/video');ws.binaryType='arraybuffer';""" +
+                """const params=new URLSearchParams(location.search);""" +
+                """const cam=(params.get('cam')||params.get('camera')||'').toLowerCase();""" +
+                """const isSec=location.pathname.includes('front')||location.pathname.includes('secondary')||['front','secondary','sec','1'].includes(cam);""" +
+                """const wsPath=isSec?'/ws/secondary':'/ws/video';""" +
+                """ws=new WebSocket(proto+'//'+location.host+wsPath+location.search);ws.binaryType='arraybuffer';""" +
                 """ws.onmessage=e=>{""" +
                 """if(e.data.byteLength>18){""" +
                 """const jpeg=e.data.slice(18);""" +
@@ -383,6 +388,7 @@ class BinaryWebSocketHelper(
 
     private val clients = CopyOnWriteArrayList<WebSocketClient>()
     private val frameCounter = AtomicInteger(0)
+    private val secFrameCounter = AtomicInteger(0)
 
     private val writerExecutor: ExecutorService = ThreadPoolExecutor(
         2,
@@ -396,6 +402,7 @@ class BinaryWebSocketHelper(
 
     fun getClients(): List<WebSocketClient> = clients.toList()
     fun hasClients(): Boolean = clients.isNotEmpty()
+    fun hasClientsForChannel(channel: String): Boolean = clients.any { !it.isClosed && !it.socket.isClosed && it.streamChannel == channel }
     fun clientCount(): Int = clients.size
 
     fun handleHandshake(headers: List<String>, outputStream: OutputStream): Boolean {
@@ -407,8 +414,13 @@ class BinaryWebSocketHelper(
         return true
     }
 
-    fun registerClient(socket: Socket, outputStream: OutputStream, isAuthenticated: Boolean): WebSocketClient {
-        val client = WebSocketClient(socket, outputStream, isAuthenticated)
+    fun registerClient(
+        socket: Socket,
+        outputStream: OutputStream,
+        isAuthenticated: Boolean,
+        channel: String = "primary"
+    ): WebSocketClient {
+        val client = WebSocketClient(socket, outputStream, isAuthenticated, streamChannel = channel)
         clients.add(client)
         onClientConnected()
         return client
@@ -424,12 +436,13 @@ class BinaryWebSocketHelper(
     fun broadcastVideoFrame(
         jpegBytes: ByteArray,
         timestamp: Long = System.currentTimeMillis(),
-        flags: Short = 0
+        flags: Short = 0,
+        channel: String = "primary"
     ) {
-        val activeClients = clients
+        val activeClients = clients.filter { !it.isClosed && !it.socket.isClosed && it.streamChannel == channel }
         if (activeClients.isEmpty()) return
 
-        val frameIndex = frameCounter.getAndIncrement()
+        val frameIndex = if (channel == "primary") frameCounter.getAndIncrement() else secFrameCounter.getAndIncrement()
         val messageBytes = encodeVideoFrameMessage(jpegBytes, timestamp, frameIndex, flags)
 
         for (client in activeClients) {
