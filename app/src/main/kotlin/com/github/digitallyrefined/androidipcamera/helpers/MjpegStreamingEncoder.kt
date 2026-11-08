@@ -109,8 +109,10 @@ class MjpegStreamingEncoder(
             val fpsCoerced = fps.coerceIn(1, 60)
             val delay = try { 1000L / fpsCoerced } catch (_: Exception) { 33L }
             val currentTime = System.currentTimeMillis()
+            // Jitter tolerance of 8ms ensures ~30fps camera frames (often arriving at 31-33ms) are not dropped to 15fps
+            val minInterval = (delay - 8L).coerceAtLeast(0L)
 
-            if (currentTime - lastFrameTime < delay) return
+            if (currentTime - lastFrameTime < minInterval) return
             lastFrameTime = currentTime
 
             val camId = prefs.getString("camera_id", null)
@@ -189,7 +191,8 @@ class MjpegStreamingEncoder(
             val fpsCoerced = fps.coerceIn(1, 60)
             val delay = try { 1000L / fpsCoerced } catch (_: Exception) { 33L }
             val currentTime = System.currentTimeMillis()
-            if (currentTime - lastFrameTime < delay) return
+            val minInterval = (delay - 8L).coerceAtLeast(0L)
+            if (currentTime - lastFrameTime < minInterval) return
             lastFrameTime = currentTime
 
             val camId = prefs.getString("camera_id", null)

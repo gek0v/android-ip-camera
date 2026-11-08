@@ -476,14 +476,17 @@ class CameraXCapture(
 
     /** The camera's WIDEST advertised AE FPS range — leaves auto-exposure fully free while giving legacy
      *  HALs the explicit range they need to not stall the analysis stream. Not a fixed-fps lock. */
+    /** Prefers AE target ranges with high lower bounds (e.g. [30, 30] or [24, 30]) so Tensor/HAL doesn't throttle shutter to 15fps in normal indoor lighting. */
     private fun aeFpsRange(): Range<Int>? = try {
         val cm = ctx.getSystemService(Context.CAMERA_SERVICE) as CameraManager
         val want = if (front) CameraCharacteristics.LENS_FACING_FRONT else CameraCharacteristics.LENS_FACING_BACK
         val id = logicalCameraId?.takeIf { it in cm.cameraIdList }
             ?: cm.cameraIdList.firstOrNull { cm.getCameraCharacteristics(it).get(CameraCharacteristics.LENS_FACING) == want }
             ?: cm.cameraIdList.first()
-        cm.getCameraCharacteristics(id).get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES)
-            ?.maxWithOrNull(compareBy({ it.upper - it.lower }, { it.upper }))
+        val ranges = cm.getCameraCharacteristics(id).get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES) ?: return null
+        ranges.firstOrNull { it.lower >= 30 && it.upper >= 30 }
+            ?: ranges.filter { it.upper >= 30 }.maxByOrNull { it.lower }
+            ?: ranges.maxWithOrNull(compareBy({ it.upper - it.lower }, { it.upper }))
     } catch (e: Exception) { Log.e(TAG, "aeRange: ${e.message}"); null }
 
     override fun stop() {
