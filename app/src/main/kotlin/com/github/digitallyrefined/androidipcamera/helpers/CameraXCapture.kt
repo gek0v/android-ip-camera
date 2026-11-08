@@ -20,6 +20,8 @@ import androidx.camera.camera2.interop.CaptureRequestOptions
 import androidx.camera.camera2.interop.ExperimentalCamera2Interop
 import androidx.camera.core.AspectRatio
 import androidx.camera.core.CameraSelector
+import androidx.camera.core.ConcurrentCamera
+import androidx.camera.core.UseCaseGroup
 import androidx.camera.core.FocusMeteringAction
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageCapture
@@ -72,6 +74,16 @@ class CameraXCapture(
     // Always co-bound with the stream so a still snaps straight from the bound use case (no rebind).
     private var boundSelector: CameraSelector? = null
     private var analysisUseCase: ImageAnalysis? = null
+    private var secondaryAnalysisUseCase: ImageAnalysis? = null
+    @Volatile private var onPipFrameCallback: ((ByteArray, Int, Int) -> Unit)? = null
+
+    fun setPipFrameCallback(cb: ((ByteArray, Int, Int) -> Unit)?) {
+        onPipFrameCallback = cb
+    }
+
+    fun hasConcurrentSupport(): Boolean = try {
+        provider?.availableConcurrentCameraInfos?.isNotEmpty() == true
+    } catch (_: Throwable) { false }
     private var previewUseCase: Preview? = null
     private var encoderUseCase: Preview? = null
     @Volatile private var released = false
@@ -223,6 +235,47 @@ class CameraXCapture(
         val p = provider ?: return
         val sel = boundSelector ?: return
         val analysis = analysisUseCase ?: return
+
+        val prefs = androidx.preference.PreferenceManager.getDefaultSharedPreferences(ctx)
+        val pipRequested = prefs.getBoolean("pip_enabled", false)
+        val canDoConcurrent = pipRequested && hasConcurrentSupport()
+
+        if (canDoConcurrent) {
+            try {
+                p.unbindAll()
+                val primaryGroup = UseCaseGroup.Builder().addUseCase(analysis).apply {
+                    previewUseCase?.let { addUseCase(it) }
+                }.build()
+
+                val secSel = if (front) CameraSelector.DEFAULT_BACK_CAMERA else CameraSelector.DEFAULT_FRONT_CAMERA
+                val secAnalysis = ImageAnalysis.Builder()
+                    .setResolutionSelector(ResolutionSelector.Builder()
+                        .setResolutionStrategy(ResolutionStrategy(Size(640, 480), ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER_THEN_LOWER))
+                        .build())
+                    .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                    .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_YUV_420_888)
+                    .build().also { sa ->
+                        sa.setAnalyzer(analysisExec) { secImg ->
+                            try {
+                                val nv21 = convertYUV420toNV21(secImg)
+                                onPipFrameCallback?.invoke(nv21, secImg.width, secImg.height)
+                            } finally {
+                                secImg.close()
+                            }
+                        }
+                    }
+                secondaryAnalysisUseCase = secAnalysis
+                val secondaryGroup = UseCaseGroup.Builder().addUseCase(secAnalysis).build()
+
+                val primaryConfig = ConcurrentCamera.SingleCameraConfig(sel, primaryGroup, owner)
+                val secondaryConfig = ConcurrentCamera.SingleCameraConfig(secSel, secondaryGroup, owner)
+                p.bindToLifecycle(listOf(primaryConfig, secondaryConfig))
+                Log.i(TAG, "Successfully bound Dual Concurrent Cameras for PiP mode")
+                return
+            } catch (e: Exception) {
+                Log.w(TAG, "Concurrent camera binding failed, falling back to single camera: ${e.message}")
+            }
+        }
         val cases = mutableListOf<androidx.camera.core.UseCase>()
         previewUseCase?.let { cases.add(it) }
         encoderUseCase?.let { cases.add(it) }

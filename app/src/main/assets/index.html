@@ -782,6 +782,43 @@
           </div>
         </section>
 
+        <!-- Multi-Camera Dual PiP Card (iPhone Style) -->
+        <section class="card">
+          <div class="card-title">
+            <span>📱 Dual Camera (iPhone PiP)</span>
+            <span class="val-badge" id="pipStateBadge">Single</span>
+          </div>
+
+          <label style="display:flex; align-items:center; gap:8px; cursor:pointer;">
+            <input type="checkbox" id="pipCheckbox" onchange="onPipToggle(this.checked)">
+            <span>Enable Front &amp; Back Dual Streaming</span>
+          </label>
+
+          <div id="pipControlsRow" class="grid-2" style="display:none; margin-top:4px;">
+            <div class="control-row">
+              <div class="control-header">
+                <label for="pipPosSelect">Inset Position</label>
+              </div>
+              <select id="pipPosSelect" onchange="sendControl('pip_position', this.value)">
+                <option value="top-right">Top Right (Default)</option>
+                <option value="top-left">Top Left</option>
+                <option value="bottom-right">Bottom Right</option>
+                <option value="bottom-left">Bottom Left</option>
+              </select>
+            </div>
+            <div class="control-row">
+              <div class="control-header">
+                <label for="pipSizeSelect">Inset Size</label>
+              </div>
+              <select id="pipSizeSelect" onchange="sendControl('pip_size', this.value)">
+                <option value="0.20">Small (20%)</option>
+                <option value="0.28" selected>Medium (28%)</option>
+                <option value="0.35">Large (35%)</option>
+              </select>
+            </div>
+          </div>
+        </section>
+
         <!-- Audio & Push to Talk Card -->
         <section class="card">
           <div class="card-title">
@@ -856,7 +893,7 @@
         </section>
 
         <footer style="text-align: center; color: var(--text-dim); font-size: 11px; padding: 6px 0 16px;">
-          Android IP Camera &bull; <span id="appVersion">v0.17.3</span>
+          Android IP Camera &bull; <span id="appVersion">v0.18.0</span>
         </footer>
       </div>
     </aside>
@@ -1195,6 +1232,15 @@
       showToast('🎯 Triggered Auto Focus');
     });
 
+    function onPipToggle(checked) {
+      sendControl('pip_enabled', checked ? 'true' : 'false');
+      const row = getEl('pipControlsRow');
+      if (row) row.style.display = checked ? 'grid' : 'none';
+      const badge = getEl('pipStateBadge');
+      if (badge) badge.textContent = checked ? 'Dual PiP' : 'Single';
+      showToast(checked ? '📱 Dual Camera (iPhone PiP) Enabled' : 'Single Camera Active');
+    }
+
     function onFocusModeChange(mode) {
       sendControl('focus_mode', mode);
       const row = getEl('focusDistanceRow');
@@ -1418,6 +1464,24 @@
             if (s.focusMode) {
               getEl('focusModeSelect').value = s.focusMode;
               onFocusModeChange(s.focusMode);
+            }
+            if (s.pipEnabled !== undefined) {
+              const chk = getEl('pipCheckbox');
+              if (chk) {
+                chk.checked = !!s.pipEnabled;
+                const row = getEl('pipControlsRow');
+                if (row) row.style.display = chk.checked ? 'grid' : 'none';
+                const badge = getEl('pipStateBadge');
+                if (badge) badge.textContent = chk.checked ? 'Dual PiP' : 'Single';
+              }
+            }
+            if (s.pipPosition) {
+              const sel = getEl('pipPosSelect');
+              if (sel) sel.value = s.pipPosition;
+            }
+            if (s.pipSize) {
+              const sel = getEl('pipSizeSelect');
+              if (sel) sel.value = s.pipSize;
             }
           }
 

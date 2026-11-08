@@ -480,7 +480,7 @@ class StreamingService : LifecycleService() {
 
     private fun startCameraXBackend(want: Size) {
         val showScreenPreview = !encoders.any { it.hasClients() } && currentSurfaceProvider != null
-        backend = CameraXCapture(
+        val cx = CameraXCapture(
             this, this, frontFacing, selectedCameraId, want,
             if (showScreenPreview) currentSurfaceProvider else null
         ) { img ->
@@ -496,8 +496,14 @@ class StreamingService : LifecycleService() {
             } finally {
                 img.close()
             }
-        }.also { it.start() }
-        applyStored(backend!!)
+        }.also {
+            it.setPipFrameCallback { nv21, w, h ->
+                mjpegStreamingEncoder?.updatePipFrame(nv21, w, h)
+            }
+            it.start()
+        }
+        backend = cx
+        applyStored(cx)
         Log.i(TAG, "stream ${camId()} api=camerax")
     }
 
@@ -857,6 +863,16 @@ class StreamingService : LifecycleService() {
                     prefs.edit().putString("mirror_$id", value).apply()
                     if (physicalId.isNotBlank() && physicalId != id) prefs.edit().putString("mirror_$physicalId", value).apply()
                 }
+            }
+            "pip_enabled" -> {
+                val enabled = value.equals("true", ignoreCase = true) || value == "1"
+                prefs.edit().putBoolean("pip_enabled", enabled).apply()
+                mjpegStreamingEncoder?.handleRemoteControl(key, value)
+                launchMain { debouncedStartCamera(force = true) }
+            }
+            "pip_position", "pip_size" -> {
+                prefs.edit().putString(key, value).apply()
+                mjpegStreamingEncoder?.handleRemoteControl(key, value)
             }
             "quality" -> {
                 val q = value.toIntOrNull()

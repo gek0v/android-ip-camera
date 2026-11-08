@@ -1404,6 +1404,9 @@ class StreamingServerHelper(
         val snapshotRes: String,
         val motionDetectionEnabled: Boolean,
         val motionSensitivity: String,
+        val pipEnabled: Boolean,
+        val pipPosition: String,
+        val pipSize: String,
     )
 
     private data class DeviceInfo(
@@ -1473,6 +1476,9 @@ class StreamingServerHelper(
                 put("snapshotRes", settings.snapshotRes)
                 put("motionDetectionEnabled", settings.motionDetectionEnabled)
                 put("motionSensitivity", settings.motionSensitivity)
+                put("pipEnabled", settings.pipEnabled)
+                put("pipPosition", settings.pipPosition)
+                put("pipSize", settings.pipSize)
             })
             put("appVersion", context.packageManager.getPackageInfo(context.packageName, 0).versionName.orEmpty())
         }.toString()
@@ -1624,6 +1630,9 @@ class StreamingServerHelper(
             snapshotRes = prefs.getString("snapshot_res_$cameraId", "max") ?: "max",
             motionDetectionEnabled = prefs.getBoolean("motion_detection_enabled", false),
             motionSensitivity = prefs.getString("motion_sensitivity", "5") ?: "5",
+            pipEnabled = prefs.getBoolean("pip_enabled", false),
+            pipPosition = prefs.getString("pip_position", "top-right") ?: "top-right",
+            pipSize = prefs.getString("pip_size", "0.28") ?: "0.28",
         )
     }
 

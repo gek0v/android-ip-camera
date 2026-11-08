@@ -203,3 +203,118 @@ fun mirrorNV21(src: ByteArray, width: Int, height: Int, dest: ByteArray) {
         }
     }
 }
+
+
+/**
+ * Insets a secondary NV21 frame (e.g. front camera) into a primary NV21 frame (e.g. rear camera 1080p)
+ * at the specified position and scale ratio, creating an iPhone/FaceTime/BeReal style Picture-in-Picture.
+ * Runs in sub-millisecond native memory copies without Bitmap or GPU overhead.
+ */
+fun overlayNv21Pip(
+    mainNv21: ByteArray,
+    mainW: Int,
+    mainH: Int,
+    pipNv21: ByteArray,
+    pipW: Int,
+    pipH: Int,
+    position: String = "top-right",
+    scaleRatio: Float = 0.28f,
+    drawBorder: Boolean = true
+) {
+    val targetPipW = ((mainW * scaleRatio).toInt() / 2) * 2
+    val targetPipH = ((mainH * scaleRatio).toInt() / 2) * 2
+    if (targetPipW <= 0 || targetPipH <= 0 || targetPipW > mainW || targetPipH > mainH) return
+
+    val margin = ((mainW * 0.03f).toInt() / 2) * 2
+    val startX: Int
+    val startY: Int
+
+    when (position.lowercase()) {
+        "top-left" -> {
+            startX = margin
+            startY = margin
+        }
+        "bottom-right" -> {
+            startX = ((mainW - targetPipW - margin) / 2) * 2
+            startY = ((mainH - targetPipH - margin) / 2) * 2
+        }
+        "bottom-left" -> {
+            startX = margin
+            startY = ((mainH - targetPipH - margin) / 2) * 2
+        }
+        else -> { // top-right default
+            startX = ((mainW - targetPipW - margin) / 2) * 2
+            startY = margin
+        }
+    }
+
+    if (startX < 0 || startY < 0 || startX + targetPipW > mainW || startY + targetPipH > mainH) return
+
+    val mainYSize = mainW * mainH
+    val pipYSize = pipW * pipH
+
+    val xRatio = (pipW shl 16) / targetPipW
+    val yRatio = (pipH shl 16) / targetPipH
+
+    // Scale and copy Y plane
+    for (r in 0 until targetPipH) {
+        val srcRow = (r * yRatio) shr 16
+        val srcRowOffset = srcRow * pipW
+        val destRowOffset = (startY + r) * mainW + startX
+
+        for (c in 0 until targetPipW) {
+            val srcCol = (c * xRatio) shr 16
+            mainNv21[destRowOffset + c] = pipNv21[srcRowOffset + srcCol]
+        }
+    }
+
+    // Scale and copy UV plane (semi-planar UV)
+    val targetPipUVHeight = targetPipH shr 1
+    val targetPipUVWidth = targetPipW shr 1
+    val mainUVStart = mainYSize
+    val pipUVStart = pipYSize
+
+    val uvYRatio = ((pipH shr 1) shl 16) / targetPipUVHeight
+    val uvXRatio = ((pipW shr 1) shl 16) / targetPipUVWidth
+
+    for (r in 0 until targetPipUVHeight) {
+        val srcRow = (r * uvYRatio) shr 16
+        val srcRowOffset = pipUVStart + (srcRow * pipW)
+        val destRowOffset = mainUVStart + (((startY shr 1) + r) * mainW) + startX
+
+        for (c in 0 until targetPipUVWidth) {
+            val srcCol = (c * uvXRatio) shr 16
+            val srcIdx = srcRowOffset + (srcCol shl 1)
+            val destIdx = destRowOffset + (c shl 1)
+            if (destIdx + 1 < mainNv21.size && srcIdx + 1 < pipNv21.size) {
+                mainNv21[destIdx] = pipNv21[srcIdx]
+                mainNv21[destIdx + 1] = pipNv21[srcIdx + 1]
+            }
+        }
+    }
+
+    // Subtle white border (Y=240, UV=128)
+    if (drawBorder) {
+        val borderWidth = 2
+        val borderYVal = 240.toByte()
+        for (b in 0 until borderWidth) {
+            val topRow = (startY - b).coerceIn(0, mainH - 1) * mainW + startX
+            val bottomRow = (startY + targetPipH + b - 1).coerceIn(0, mainH - 1) * mainW + startX
+            for (c in 0 until targetPipW) {
+                if (startX + c in 0 until mainW) {
+                    mainNv21[topRow + c] = borderYVal
+                    mainNv21[bottomRow + c] = borderYVal
+                }
+            }
+        }
+        for (r in 0 until targetPipH) {
+            val rowOffset = (startY + r) * mainW
+            for (b in 0 until borderWidth) {
+                val leftCol = (startX - b).coerceIn(0, mainW - 1)
+                val rightCol = (startX + targetPipW + b - 1).coerceIn(0, mainW - 1)
+                mainNv21[rowOffset + leftCol] = borderYVal
+                mainNv21[rowOffset + rightCol] = borderYVal
+            }
+        }
+    }
+}

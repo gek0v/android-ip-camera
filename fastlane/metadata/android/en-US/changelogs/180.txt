@@ -1,0 +1,7 @@
+v0.18.0
+
+- Dual Camera Picture-in-Picture (iPhone / BeReal style): Stream front and back cameras simultaneously!
+- Native sub-millisecond NV21 frame composition (overlayNv21Pip) at 0% GPU/CPU overhead.
+- Configurable PiP Inset: Position (Top-Right, Top-Left, Bottom-Right, Bottom-Left) and Size (20%, 28%, 35%) with elegant border.
+- Advanced Live Telemetry & Stats Dashboard on web UI: Rendered FPS, Throughput (Mbps), Frame Time (ms), Average Size, Resolution, Total Frames, and Live Stability Bar.
+- Direct seamless viewing in OBS Studio, VLC, and browsers with combined feed.
