@@ -991,7 +991,7 @@ class StreamingService : LifecycleService() {
                 }
                 launchMain { debouncedStartCamera(force = true) }
             }
-            "pip_position", "pip_size" -> {
+            "pip_position", "pip_size", "dual_stream_mode" -> {
                 prefs.edit().putString(key, value).apply()
                 mjpegStreamingEncoder?.handleRemoteControl(key, value)
             }

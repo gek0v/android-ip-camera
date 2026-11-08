@@ -47,6 +47,16 @@ class MjpegStreamingEncoder(
         { runnable -> Thread(runnable, "MjpegNetworkWriter").apply { isDaemon = true } }
     ).apply { allowCoreThreadTimeOut(true) }
 
+    private val secWriterGeneration = AtomicLong()
+    private val secNetworkWriter = ThreadPoolExecutor(
+        1,
+        1,
+        30L,
+        TimeUnit.SECONDS,
+        ArrayBlockingQueue(writerQueueCapacity),
+        { runnable -> Thread(runnable, "MjpegSecNetworkWriter").apply { isDaemon = true } }
+    ).apply { allowCoreThreadTimeOut(true) }
+
     var isSceneStatic: (() -> Boolean)? = null
 
     init {
@@ -64,7 +74,7 @@ class MjpegStreamingEncoder(
     private var rotatedNv21Buffer: ByteArray? = null
     private var mirroredNv21Buffer: ByteArray? = null
 
-    // Secondary camera frame buffer for Picture-in-Picture (Dual Camera mode)
+    // Secondary camera frame buffer for Picture-in-Picture & Independent Streaming
     private val pipLock = Any()
     private var pipNv21Buffer: ByteArray? = null
     private var pipNv21WorkBuffer: ByteArray? = null
@@ -72,6 +82,12 @@ class MjpegStreamingEncoder(
     @Volatile private var pipWidth: Int = 0
     @Volatile private var pipHeight: Int = 0
     @Volatile private var pipFrameTime: Long = 0L
+
+    @Volatile private var lastSecJpeg: ByteArray? = null
+    @Volatile private var lastSecJpegAtMs: Long = 0L
+    @Volatile private var lastSecFrameTime: Long = 0L
+    private var secRotatedNv21Buffer: ByteArray? = null
+    private var secMirroredNv21Buffer: ByteArray? = null
 
     fun updatePipFrame(nv21: ByteArray, width: Int, height: Int) {
         synchronized(pipLock) {
@@ -83,6 +99,58 @@ class MjpegStreamingEncoder(
             pipHeight = height
             pipFrameTime = System.currentTimeMillis()
         }
+
+        val helper = streamingServerHelper ?: return
+        if (!helper.hasSecondaryClients()) return
+
+        val prefs = PreferenceManager.getDefaultSharedPreferences(context)
+        val fps = prefs.getString("stream_fps", "30")?.toIntOrNull() ?: 30
+        val configuredFps = fps.coerceIn(1, 60)
+        val fpsCoerced = thermalGovernor?.effectiveFps(configuredFps) ?: configuredFps
+        val delay = try { 1000L / fpsCoerced } catch (_: Exception) { 33L }
+        val currentTime = System.currentTimeMillis()
+        val minInterval = (delay - 8L).coerceAtLeast(0L)
+
+        if (currentTime - lastSecFrameTime < minInterval) return
+        lastSecFrameTime = currentTime
+
+        val camId = prefs.getString("camera_id", null)
+        val rotation = if (camId != null) {
+            val phys = camId.substringAfter(':', camId)
+            when {
+                prefs.contains("camera_rotate_$camId") -> prefs.getInt("camera_rotate_$camId", 0)
+                prefs.contains("camera_rotate_$phys") -> prefs.getInt("camera_rotate_$phys", 0)
+                else -> 0
+            }
+        } else 0
+        val totalRotation = ((rotation % 360) + 360) % 360
+
+        var workingSecNv21 = nv21
+        var secW = width
+        var secH = height
+
+        if (totalRotation != 0) {
+            if (secRotatedNv21Buffer == null || secRotatedNv21Buffer!!.size != nv21.size) {
+                secRotatedNv21Buffer = ByteArray(nv21.size)
+            }
+            val (newW, newH) = rotateNV21(workingSecNv21, secW, secH, totalRotation, secRotatedNv21Buffer!!)
+            workingSecNv21 = secRotatedNv21Buffer!!
+            secW = newW
+            secH = newH
+        }
+
+        val mirrorSec = prefs.getString("mirror_secondary", "true")?.toBoolean() ?: true
+        if (mirrorSec) {
+            if (secMirroredNv21Buffer == null || secMirroredNv21Buffer!!.size != workingSecNv21.size) {
+                secMirroredNv21Buffer = ByteArray(workingSecNv21.size)
+            }
+            mirrorNV21(workingSecNv21, secW, secH, secMirroredNv21Buffer!!)
+            workingSecNv21 = secMirroredNv21Buffer!!
+        }
+
+        val quality = resolveQuality(prefs, fpsCoerced)
+        val secJpeg = convertNV21toJPEG(workingSecNv21, secW, secH, quality)
+        broadcastSecondaryJpeg(secJpeg)
     }
 
     // Closed-loop rate control for bitrate limit
@@ -92,6 +160,8 @@ class MjpegStreamingEncoder(
     private fun invalidatePendingWrites() {
         writerGeneration.incrementAndGet()
         networkWriter.queue.clear()
+        secWriterGeneration.incrementAndGet()
+        secNetworkWriter.queue.clear()
     }
 
     private fun prefStringWithFallback(prefs: android.content.SharedPreferences, vararg keys: String): String? {
@@ -217,7 +287,8 @@ class MjpegStreamingEncoder(
             }
 
             val pipEnabled = prefs.getBoolean("pip_enabled", false)
-            if (pipEnabled) {
+            val dualMode = prefs.getString("dual_stream_mode", "separate") ?: "separate"
+            if (pipEnabled && dualMode != "separate") {
                 var pBuf: ByteArray? = null
                 var pW = 0
                 var pH = 0
@@ -335,7 +406,8 @@ class MjpegStreamingEncoder(
             }
 
             val pipEnabled = prefs.getBoolean("pip_enabled", false)
-            if (pipEnabled) {
+            val dualMode = prefs.getString("dual_stream_mode", "separate") ?: "separate"
+            if (pipEnabled && dualMode != "separate") {
                 var pBuf: ByteArray? = null
                 var pW = 0
                 var pH = 0
@@ -403,9 +475,9 @@ class MjpegStreamingEncoder(
         val helper = streamingServerHelper ?: return
 
         // Distribute to WebSocket clients concurrently with zero-blocking backpressure
-        helper.broadcastWebSocketFrame(jpegBytes, lastJpegAtMs)
+        helper.broadcastWebSocketFrame(jpegBytes, lastJpegAtMs, channel = "primary")
 
-        val clients = helper.getClients()
+        val clients = helper.getPrimaryClients()
         if (clients.isEmpty()) return
         val generation = writerGeneration.get()
 
@@ -426,6 +498,60 @@ class MjpegStreamingEncoder(
 
                     // Proactive application-level frame dropping to eradicate bufferbloat:
                     // If client socket is congested or draining too slowly, skip stale frame immediately.
+                    if (SocketTuningHelper.shouldDropFrame(client)) {
+                        client.recordDroppedFrame()
+                        return@forEach
+                    }
+
+                    try {
+                        client.markWriteStart()
+                        val os = client.outputStream
+                        os.write(FRAME_HEADER_PREFIX)
+                        os.write(lengthBytes)
+                        os.write(CRLF_CRLF)
+                        os.write(jpegBytes)
+                        os.write(CRLF)
+                        os.flush()
+                        client.markWriteSuccess()
+                    } catch (e: Exception) {
+                        client.markWriteEnd()
+                        try { client.socket.close() } catch (_: Exception) {}
+                        toRemove.add(client)
+                    }
+                }
+                toRemove.forEach { helper.removeClient(it) }
+            }
+        } catch (_: RejectedExecutionException) {
+            // Drop frame on backpressure to prevent latency build up
+        }
+    }
+
+    private fun broadcastSecondaryJpeg(jpegBytes: ByteArray) {
+        lastSecJpeg = jpegBytes
+        lastSecJpegAtMs = System.currentTimeMillis()
+        val helper = streamingServerHelper ?: return
+
+        // Distribute to secondary WebSocket clients
+        helper.broadcastSecondaryWebSocketFrame(jpegBytes, lastSecJpegAtMs)
+
+        val clients = helper.getSecondaryClients()
+        if (clients.isEmpty()) return
+        val generation = secWriterGeneration.get()
+
+        while (secNetworkWriter.queue.remainingCapacity() == 0) {
+            secNetworkWriter.queue.poll()
+        }
+
+        try {
+            secNetworkWriter.execute {
+                if (generation != secWriterGeneration.get()) return@execute
+                thermalGovernor?.applyEfficiencyThreadPriority()
+                val toRemove = mutableListOf<StreamingServerHelper.Client>()
+                val lengthBytes = jpegBytes.size.toString().toByteArray(StandardCharsets.US_ASCII)
+
+                clients.forEach { client ->
+                    if (generation != secWriterGeneration.get()) return@forEach
+
                     if (SocketTuningHelper.shouldDropFrame(client)) {
                         client.recordDroppedFrame()
                         return@forEach
@@ -513,6 +639,12 @@ class MjpegStreamingEncoder(
                 val enabled = value.equals("true", ignoreCase = true) || value == "1"
                 prefs.edit().putBoolean("pip_enabled", enabled).apply()
                 true
+            }
+            "dual_stream_mode" -> {
+                if (value in listOf("separate", "pip", "both")) {
+                    prefs.edit().putString("dual_stream_mode", value).apply()
+                    true
+                } else false
             }
             "pip_position" -> {
                 if (value in listOf("top-right", "top-left", "bottom-right", "bottom-left")) {

@@ -660,6 +660,10 @@
     </div>
     <div class="header-actions">
       <button id="togglePreviewBtn" class="btn" title="Toggle camera video preview to save CPU / network">👁️ Hide Preview</button>
+      <div id="channelSwitchGroup" style="display:none; gap:4px; align-items:center;">
+        <button id="channelPrimaryBtn" class="btn active" onclick="setPreviewChannel('primary')" title="Preview Back Camera">📷 Back</button>
+        <button id="channelSecondaryBtn" class="btn" onclick="setPreviewChannel('secondary')" title="Preview Front Camera">🤳 Front</button>
+      </div>
       <button id="fitBtn" class="btn active" onclick="setView('fit')" title="Fit to screen">Fit</button>
       <button id="origBtn" class="btn" onclick="setView('original')" title="Actual pixel dimensions">1:1</button>
       <button id="fullscreenBtn" class="btn" onclick="toggleFullscreen()" title="Fullscreen stream">⛶</button>
@@ -709,11 +713,22 @@
           </div>
           <div class="stream-url-bar">
             <span class="stream-url-text" id="streamUrlText">Loading stream URL…</span>
-            <button class="btn btn-copy" id="copyStreamBtn" onclick="copyStreamUrl()">📋 Copy</button>
+            <button class="btn btn-copy" id="copyStreamBtn" onclick="copyStreamUrl('primary')">📋 Copy</button>
           </div>
           <div class="grid-2">
-            <button class="btn" onclick="copyObsWsUrl()" title="Copy ultra-low latency WebSocket link for OBS Browser Source">⚡ Copy OBS WS</button>
-            <button class="btn" onclick="copyObsUrl()" title="Copy clean MJPEG link designed for OBS Browser Source">🎥 Copy OBS MJPEG</button>
+            <button class="btn" onclick="copyObsWsUrl('primary')" title="Copy ultra-low latency WebSocket link for OBS Browser Source">⚡ Copy OBS WS</button>
+            <button class="btn" onclick="copyObsUrl('primary')" title="Copy clean MJPEG link designed for OBS Browser Source">🎥 Copy OBS MJPEG</button>
+          </div>
+
+          <!-- Dual Camera Independent Stream Links for OBS -->
+          <div id="dualStreamObsLinks" style="display:none; margin-top:10px; padding-top:8px; border-top:1px solid var(--border);">
+            <div style="font-size:11px; font-weight:600; color:var(--accent); margin-bottom:6px; display:flex; align-items:center; gap:4px;">
+              <span>🤳 Front Camera Stream (OBS Independent)</span>
+            </div>
+            <div class="grid-2">
+              <button class="btn" onclick="copyObsWsUrl('secondary')" title="Copy Front Camera WebSocket link for OBS Browser Source">⚡ OBS WS (Front)</button>
+              <button class="btn" onclick="copyObsUrl('secondary')" title="Copy Front Camera MJPEG link for OBS Browser Source">🎥 OBS MJPEG (Front)</button>
+            </div>
           </div>
         </section>
 
@@ -983,10 +998,10 @@
           </details>
         </section>
 
-        <!-- Multi-Camera Dual PiP Card (iPhone Style) -->
+        <!-- Multi-Camera Dual Streaming Card -->
         <section class="card">
           <div class="card-title">
-            <span>📱 Dual Camera (iPhone PiP)</span>
+            <span>📱 Dual Camera (OBS &amp; PiP)</span>
             <span class="val-badge" id="pipStateBadge">Single</span>
           </div>
 
@@ -998,27 +1013,40 @@
             ⚠️ Dual camera requires hardware concurrent support (FEATURE_CAMERA_CONCURRENT), not supported by this device.
           </div>
 
-          <div id="pipControlsRow" class="grid-2" style="display:none; margin-top:4px;">
-            <div class="control-row">
+          <div id="pipControlsRow" style="display:none; margin-top:8px;">
+            <div class="control-row" style="margin-bottom:8px;">
               <div class="control-header">
-                <label for="pipPosSelect">Inset Position</label>
+                <label for="dualModeSelect">Dual Output Mode</label>
               </div>
-              <select id="pipPosSelect" onchange="sendControl('pip_position', this.value)">
-                <option value="top-right">Top Right (Default)</option>
-                <option value="top-left">Top Left</option>
-                <option value="bottom-right">Bottom Right</option>
-                <option value="bottom-left">Bottom Left</option>
+              <select id="dualModeSelect" onchange="onDualModeChange(this.value)">
+                <option value="separate" selected>🎬 Separate Streams (Clean Back &amp; Front for OBS)</option>
+                <option value="pip">🎨 PiP Inset (Blended single stream)</option>
+                <option value="both">✨ Both (Blended Main + Clean Front Stream)</option>
               </select>
             </div>
-            <div class="control-row">
-              <div class="control-header">
-                <label for="pipSizeSelect">Inset Size</label>
+
+            <div id="pipInsetSettings" class="grid-2" style="display:none; margin-top:4px;">
+              <div class="control-row">
+                <div class="control-header">
+                  <label for="pipPosSelect">Inset Position</label>
+                </div>
+                <select id="pipPosSelect" onchange="sendControl('pip_position', this.value)">
+                  <option value="top-right">Top Right (Default)</option>
+                  <option value="top-left">Top Left</option>
+                  <option value="bottom-right">Bottom Right</option>
+                  <option value="bottom-left">Bottom Left</option>
+                </select>
               </div>
-              <select id="pipSizeSelect" onchange="sendControl('pip_size', this.value)">
-                <option value="0.20">Small (20%)</option>
-                <option value="0.28" selected>Medium (28%)</option>
-                <option value="0.35">Large (35%)</option>
-              </select>
+              <div class="control-row">
+                <div class="control-header">
+                  <label for="pipSizeSelect">Inset Size</label>
+                </div>
+                <select id="pipSizeSelect" onchange="sendControl('pip_size', this.value)">
+                  <option value="0.20">Small (20%)</option>
+                  <option value="0.28" selected>Medium (28%)</option>
+                  <option value="0.35">Large (35%)</option>
+                </select>
+              </div>
             </div>
           </div>
         </section>
@@ -1164,9 +1192,37 @@
       setTimeout(() => toast.classList.remove('show'), 2000);
     }
 
-    function getStreamUrl() {
+    let currentPreviewChannel = 'primary';
+
+    function setPreviewChannel(channel) {
+      if (currentPreviewChannel === channel) return;
+      currentPreviewChannel = channel;
+      const primBtn = getEl('channelPrimaryBtn');
+      const secBtn = getEl('channelSecondaryBtn');
+      if (primBtn) primBtn.classList.toggle('active', channel === 'primary');
+      if (secBtn) secBtn.classList.toggle('active', channel === 'secondary');
+      updateStreamUrlDisplay();
+      if (streamActive && !isPreviewHidden) {
+        startStream();
+      }
+      showToast(channel === 'secondary' ? '🤳 Previewing Front Camera' : '📷 Previewing Back Camera');
+    }
+
+    function getStreamUrl(channel) {
+      const ch = channel || currentPreviewChannel;
       const loc = window.location;
-      return `${loc.protocol}//${loc.host}/video/mjpeg`;
+      const path = ch === 'secondary' ? '/video/secondary' : '/video/mjpeg';
+      const search = loc.search ? loc.search : '';
+      return `${loc.protocol}//${loc.host}${path}${search}`;
+    }
+
+    function getWebSocketUrl(channel) {
+      const ch = channel || currentPreviewChannel;
+      const loc = window.location;
+      const wsProto = loc.protocol === 'https:' ? 'wss:' : 'ws:';
+      const path = ch === 'secondary' ? '/ws/secondary' : '/ws/video';
+      const search = loc.search ? loc.search : '';
+      return `${wsProto}//${loc.host}${path}${search}`;
     }
 
     function updateStreamUrlDisplay() {
@@ -1209,22 +1265,30 @@
       prompt('Copy URL to clipboard (Ctrl+C, Enter):', text);
     }
 
-    function copyObsWsUrl() {
+    function copyObsWsUrl(channel) {
+      const ch = channel || currentPreviewChannel;
       const loc = window.location;
-      const url = loc.protocol + "//" + loc.host + "/ws/obs";
-      copyToClipboard(url, '⚡ OBS WebSocket link copied!');
+      const isFront = ch === 'secondary';
+      const path = isFront ? '/ws/obs?cam=front' : '/ws/obs';
+      const url = loc.protocol + "//" + loc.host + path;
+      copyToClipboard(url, isFront ? '🤳 Front Camera OBS WS link copied!' : '⚡ OBS WebSocket link copied!');
     }
 
-    function copyObsUrl() {
+    function copyObsUrl(channel) {
+      const ch = channel || currentPreviewChannel;
       const loc = window.location;
-      const search = loc.search ? loc.search : "";
-      const url = loc.protocol + "//" + loc.host + "/obs" + search;
-      copyToClipboard(url, '🎥 OBS Browser link copied!');
+      const isFront = ch === 'secondary';
+      const path = isFront ? '/obs?cam=front' : '/obs';
+      const search = loc.search ? (isFront ? '&' + loc.search.substring(1) : loc.search) : '';
+      const url = loc.protocol + "//" + loc.host + path + search;
+      copyToClipboard(url, isFront ? '🤳 Front Camera OBS Browser link copied!' : '🎥 OBS Browser link copied!');
     }
 
-    function copyStreamUrl() {
-      const url = getStreamUrl();
-      copyToClipboard(url, '📋 Stream link copied!');
+    function copyStreamUrl(channel) {
+      const ch = channel || currentPreviewChannel;
+      const url = getStreamUrl(ch);
+      const isFront = ch === 'secondary';
+      copyToClipboard(url, isFront ? '🤳 Front Camera Stream link copied!' : '📋 Stream link copied!');
     }
 
     // Toggle Preview
@@ -1458,9 +1522,7 @@
       stopMjpegStream();
       wsConnecting = true;
 
-      const loc = window.location;
-      const wsProto = loc.protocol === 'https:' ? 'wss:' : 'ws:';
-      const wsUrl = wsProto + '//' + loc.host + '/ws/video' + loc.search;
+      const wsUrl = getWebSocketUrl();
 
       try {
         ws = new WebSocket(wsUrl);
@@ -1560,7 +1622,7 @@
       mjpegRunning = true;
       streamLoading.style.display = 'flex';
 
-      fetch('/video/mjpeg', {
+      fetch(getStreamUrl(), {
         cache: 'no-store',
         credentials: 'include',
         signal: controller.signal
@@ -1767,10 +1829,27 @@
     function onPipToggle(checked) {
       sendControl('pip_enabled', checked ? 'true' : 'false');
       const row = getEl('pipControlsRow');
-      if (row) row.style.display = checked ? 'grid' : 'none';
+      if (row) row.style.display = checked ? 'block' : 'none';
       const badge = getEl('pipStateBadge');
-      if (badge) badge.textContent = checked ? 'Dual PiP' : 'Single';
-      showToast(checked ? '📱 Dual Camera (iPhone PiP) Enabled' : 'Single Camera Active');
+      if (badge) {
+        badge.textContent = checked ? 'Dual Active' : 'Single';
+        badge.style.color = checked ? 'var(--accent)' : 'var(--muted)';
+      }
+      const dualObsLinks = getEl('dualStreamObsLinks');
+      if (dualObsLinks) dualObsLinks.style.display = checked ? 'block' : 'none';
+      const chSwitchGroup = getEl('channelSwitchGroup');
+      if (chSwitchGroup) chSwitchGroup.style.display = checked ? 'inline-flex' : 'none';
+      if (!checked && currentPreviewChannel === 'secondary') {
+        setPreviewChannel('primary');
+      }
+      showToast(checked ? '📱 Dual Camera (Front & Back) Enabled' : 'Single Camera Active');
+    }
+
+    function onDualModeChange(mode) {
+      sendControl('dual_stream_mode', mode);
+      const insetRow = getEl('pipInsetSettings');
+      if (insetRow) insetRow.style.display = (mode === 'pip' || mode === 'both') ? 'grid' : 'none';
+      showToast('Dual Mode: ' + (mode === 'separate' ? 'Separate streams for OBS' : (mode === 'pip' ? 'PiP blended' : 'Both')));
     }
 
     function onFocusModeChange(mode) {
@@ -2044,12 +2123,24 @@
               if (unsuppMsg) unsuppMsg.style.display = 'none';
               if (s.pipEnabled !== undefined && chk) {
                 chk.checked = !!s.pipEnabled;
-                if (row) row.style.display = chk.checked ? 'grid' : 'none';
+                if (row) row.style.display = chk.checked ? 'block' : 'none';
                 if (badge) {
-                  badge.textContent = chk.checked ? 'Dual PiP' : 'Single';
+                  badge.textContent = chk.checked ? 'Dual Active' : 'Single';
                   badge.style.color = chk.checked ? 'var(--accent)' : 'var(--muted)';
                 }
               }
+            }
+            const isDualActive = hasConcurrent && chk && chk.checked;
+            const dualObsLinks = getEl('dualStreamObsLinks');
+            const chSwitchGroup = getEl('channelSwitchGroup');
+            if (dualObsLinks) dualObsLinks.style.display = isDualActive ? 'block' : 'none';
+            if (chSwitchGroup) chSwitchGroup.style.display = isDualActive ? 'inline-flex' : 'none';
+
+            if (s.dualStreamMode) {
+              const modeSel = getEl('dualModeSelect');
+              if (modeSel) modeSel.value = s.dualStreamMode;
+              const insetRow = getEl('pipInsetSettings');
+              if (insetRow) insetRow.style.display = (s.dualStreamMode === 'pip' || s.dualStreamMode === 'both') ? 'grid' : 'none';
             }
             if (s.pipPosition) {
               const sel = getEl('pipPosSelect');
