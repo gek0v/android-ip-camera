@@ -1,0 +1,6 @@
+v0.17.2
+
+- Autoresearch Optimization: Fixed the 15fps cap in 1080p, unlocking 24-30+ continuous FPS.
+- Fixed Camera2 AE Target FPS Range selection: Prioritizes [30, 30] and high lower bounds, preventing Google Tensor AE from dropping the shutter time to 1/15s in ambient room lighting.
+- Added 8ms jitter tolerance in the streaming frame limiter to prevent hardware clock variations from dropping alternate frames.
+- Implemented bulk memory transfer for full-frame 1080p Y-plane, jumping pipeline processing throughput to 770-848 fps.
