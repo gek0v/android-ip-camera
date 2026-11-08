@@ -264,4 +264,71 @@ class BinaryWebSocketHelperTest {
         assertTrue(html.contains("/ws/video"))
         assertTrue(html.contains("cam"))
     }
+
+    @Test
+    fun testWriteVideoHeaderAndFrameHeader_matchesEncodeVideoFrameMessage() {
+        val testSizes = listOf(50, 1000, 70000)
+        for (size in testSizes) {
+            val jpeg = ByteArray(size) { (it % 256).toByte() }
+            val ts = 1710000000123L
+            val frameIndex = 88
+            val flags = 1.toShort()
+
+            val expectedFull = BinaryWebSocketHelper.encodeVideoFrameMessage(jpeg, ts, frameIndex, flags)
+
+            val headerBuf = ByteArray(BinaryWebSocketHelper.MAX_HEADER_SIZE)
+            val headerLen = BinaryWebSocketHelper.writeVideoHeaderAndFrameHeader(
+                out = headerBuf,
+                offset = 0,
+                jpegSize = jpeg.size,
+                timestamp = ts,
+                frameIndex = frameIndex,
+                flags = flags
+            )
+
+            // Header part of full message must equal written header
+            val expectedHeader = expectedFull.copyOfRange(0, headerLen)
+            val actualHeader = headerBuf.copyOfRange(0, headerLen)
+            assertArrayEquals(expectedHeader, actualHeader)
+
+            // Length matches expected header size + video header size
+            assertEquals(expectedFull.size - jpeg.size, headerLen)
+        }
+    }
+
+    @Test
+    fun testSendVideoFrameZeroCopyMatchesFullMessage() {
+        val jpeg = ByteArray(500) { (it xor 0x55).toByte() }
+        val ts = 1720000000456L
+        val frameIndex = 120
+        val flags = 0.toShort()
+
+        val expectedFullMessage = BinaryWebSocketHelper.encodeVideoFrameMessage(jpeg, ts, frameIndex, flags)
+
+        val mockSocket = java.net.Socket()
+        val outStream = java.io.ByteArrayOutputStream()
+        val helper = BinaryWebSocketHelper()
+        val client = helper.registerClient(mockSocket, outStream, isAuthenticated = true)
+
+        val headerBuf = ByteArray(BinaryWebSocketHelper.MAX_HEADER_SIZE)
+        val headerLen = BinaryWebSocketHelper.writeVideoHeaderAndFrameHeader(
+            out = headerBuf,
+            offset = 0,
+            jpegSize = jpeg.size,
+            timestamp = ts,
+            frameIndex = frameIndex,
+            flags = flags
+        )
+
+        val ok = client.sendVideoFrame(headerBuf, 0, headerLen, jpeg, 0, jpeg.size)
+        assertTrue(ok)
+        assertArrayEquals(expectedFullMessage, outStream.toByteArray())
+    }
+
+    @Test
+    fun testObsWebSocketHtml_includesFastBitmapDecodeOptions() {
+        val html = BinaryWebSocketHelper.getObsWebSocketHtml()
+        assertTrue(html.contains("premultiplyAlpha:'none'"))
+        assertTrue(html.contains("colorSpaceConversion:'none'"))
+    }
 }

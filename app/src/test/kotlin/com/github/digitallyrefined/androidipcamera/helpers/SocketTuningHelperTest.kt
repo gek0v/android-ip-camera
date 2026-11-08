@@ -252,4 +252,39 @@ class SocketTuningHelperTest {
         client.markWriteSuccess()
         assertFalse(client.isWriting)
     }
+
+    @Test
+    fun shouldDropFrameForWebSocketClientTracksDropsAndBufferStatus() {
+        val socket = clientSocket!!
+        val os = ByteArrayOutputStream()
+        val wsClient = WebSocketClient(
+            socket = socket,
+            outputStream = os,
+            isAuthenticated = true,
+            streamChannel = "primary"
+        )
+
+        assertEquals(0L, wsClient.droppedFrames)
+        assertFalse(wsClient.isWriting.get())
+
+        // Simulate buffer saturation
+        SocketTuningHelper.osPollOutChecker = { false }
+        val shouldDrop = SocketTuningHelper.shouldDropFrame(wsClient)
+        assertTrue(shouldDrop)
+
+        if (shouldDrop) {
+            wsClient.recordDroppedFrame()
+        }
+        assertEquals(1L, wsClient.droppedFrames)
+
+        // Simulate buffer cleared
+        SocketTuningHelper.osPollOutChecker = { true }
+        assertFalse(SocketTuningHelper.shouldDropFrame(wsClient))
+
+        // Simulate active write
+        assertTrue(wsClient.isWriting.compareAndSet(false, true))
+        assertTrue(wsClient.isWriting.get())
+        wsClient.isWriting.set(false)
+        assertFalse(wsClient.isWriting.get())
+    }
 }

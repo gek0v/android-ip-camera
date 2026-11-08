@@ -33,27 +33,39 @@ class MjpegStreamingEncoder(
         private val FRAME_HEADER_PREFIX = "--frame\r\nContent-Type: image/jpeg\r\nContent-Length: ".toByteArray(StandardCharsets.US_ASCII)
         private val CRLF_CRLF = "\r\n\r\n".toByteArray(StandardCharsets.US_ASCII)
         private val CRLF = "\r\n".toByteArray(StandardCharsets.US_ASCII)
+
+        /**
+         * Pre-renders the multipart frame boundary and Content-Length header in a single pass.
+         */
+        fun buildMjpegHeader(length: Int): ByteArray {
+            val lenBytes = length.toString().toByteArray(StandardCharsets.US_ASCII)
+            val header = ByteArray(FRAME_HEADER_PREFIX.size + lenBytes.size + CRLF_CRLF.size)
+            System.arraycopy(FRAME_HEADER_PREFIX, 0, header, 0, FRAME_HEADER_PREFIX.size)
+            System.arraycopy(lenBytes, 0, header, FRAME_HEADER_PREFIX.size, lenBytes.size)
+            System.arraycopy(CRLF_CRLF, 0, header, FRAME_HEADER_PREFIX.size + lenBytes.size, CRLF_CRLF.size)
+            return header
+        }
     }
 
     // Keep capacity tight (1 or 2 max) for ultra-low latency - never accumulate stale frames
     private val writerQueueCapacity = DeviceMemoryHelper.mjpegWriterQueueCapacity(context)
     private val writerGeneration = AtomicLong()
     private val networkWriter = ThreadPoolExecutor(
-        1,
-        1,
+        2,
+        4,
         30L,
         TimeUnit.SECONDS,
-        ArrayBlockingQueue(writerQueueCapacity),
+        ArrayBlockingQueue(writerQueueCapacity.coerceAtLeast(2)),
         { runnable -> Thread(runnable, "MjpegNetworkWriter").apply { isDaemon = true } }
     ).apply { allowCoreThreadTimeOut(true) }
 
     private val secWriterGeneration = AtomicLong()
     private val secNetworkWriter = ThreadPoolExecutor(
-        1,
-        1,
+        2,
+        4,
         30L,
         TimeUnit.SECONDS,
-        ArrayBlockingQueue(writerQueueCapacity),
+        ArrayBlockingQueue(writerQueueCapacity.coerceAtLeast(2)),
         { runnable -> Thread(runnable, "MjpegSecNetworkWriter").apply { isDaemon = true } }
     ).apply { allowCoreThreadTimeOut(true) }
 
@@ -487,11 +499,11 @@ class MjpegStreamingEncoder(
         }
 
         try {
+            val headerBytes = buildMjpegHeader(jpegBytes.size)
             networkWriter.execute {
                 if (generation != writerGeneration.get()) return@execute
                 thermalGovernor?.applyEfficiencyThreadPriority()
                 val toRemove = mutableListOf<StreamingServerHelper.Client>()
-                val lengthBytes = jpegBytes.size.toString().toByteArray(StandardCharsets.US_ASCII)
 
                 clients.forEach { client ->
                     if (generation != writerGeneration.get()) return@forEach
@@ -503,15 +515,19 @@ class MjpegStreamingEncoder(
                         return@forEach
                     }
 
+                    if (!client.markWriteStart()) {
+                        client.recordDroppedFrame()
+                        return@forEach
+                    }
+
                     try {
-                        client.markWriteStart()
-                        val os = client.outputStream
-                        os.write(FRAME_HEADER_PREFIX)
-                        os.write(lengthBytes)
-                        os.write(CRLF_CRLF)
-                        os.write(jpegBytes)
-                        os.write(CRLF)
-                        os.flush()
+                        synchronized(client.outputStream) {
+                            val os = client.outputStream
+                            os.write(headerBytes)
+                            os.write(jpegBytes)
+                            os.write(CRLF)
+                            os.flush()
+                        }
                         client.markWriteSuccess()
                     } catch (e: Exception) {
                         client.markWriteEnd()
@@ -543,11 +559,11 @@ class MjpegStreamingEncoder(
         }
 
         try {
+            val headerBytes = buildMjpegHeader(jpegBytes.size)
             secNetworkWriter.execute {
                 if (generation != secWriterGeneration.get()) return@execute
                 thermalGovernor?.applyEfficiencyThreadPriority()
                 val toRemove = mutableListOf<StreamingServerHelper.Client>()
-                val lengthBytes = jpegBytes.size.toString().toByteArray(StandardCharsets.US_ASCII)
 
                 clients.forEach { client ->
                     if (generation != secWriterGeneration.get()) return@forEach
@@ -557,15 +573,19 @@ class MjpegStreamingEncoder(
                         return@forEach
                     }
 
+                    if (!client.markWriteStart()) {
+                        client.recordDroppedFrame()
+                        return@forEach
+                    }
+
                     try {
-                        client.markWriteStart()
-                        val os = client.outputStream
-                        os.write(FRAME_HEADER_PREFIX)
-                        os.write(lengthBytes)
-                        os.write(CRLF_CRLF)
-                        os.write(jpegBytes)
-                        os.write(CRLF)
-                        os.flush()
+                        synchronized(client.outputStream) {
+                            val os = client.outputStream
+                            os.write(headerBytes)
+                            os.write(jpegBytes)
+                            os.write(CRLF)
+                            os.flush()
+                        }
                         client.markWriteSuccess()
                     } catch (e: Exception) {
                         client.markWriteEnd()
