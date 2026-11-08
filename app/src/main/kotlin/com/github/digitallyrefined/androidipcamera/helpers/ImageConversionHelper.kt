@@ -230,8 +230,14 @@ fun overlayNv21Pip(
     scaleRatio: Float = 0.28f,
     drawBorder: Boolean = true
 ) {
-    val targetPipW = ((mainW * scaleRatio).toInt() / 2) * 2
-    val targetPipH = ((mainH * scaleRatio).toInt() / 2) * 2
+    if (pipW <= 0 || pipH <= 0 || mainW <= 0 || mainH <= 0 || scaleRatio <= 0f || scaleRatio > 1f) return
+    val pipAspect = pipW.toFloat() / pipH.toFloat()
+    var targetPipW = ((mainW * scaleRatio).toInt() / 2) * 2
+    var targetPipH = if (pipAspect > 0f) ((targetPipW / pipAspect).toInt() / 2) * 2 else targetPipW
+    if (targetPipH > mainH) {
+        targetPipH = ((mainH * scaleRatio).toInt() / 2) * 2
+        targetPipW = if (pipAspect > 0f) ((targetPipH * pipAspect).toInt() / 2) * 2 else targetPipH
+    }
     if (targetPipW <= 0 || targetPipH <= 0 || targetPipW > mainW || targetPipH > mainH) return
 
     val margin = ((mainW * 0.03f).toInt() / 2) * 2

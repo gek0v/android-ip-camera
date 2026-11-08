@@ -176,10 +176,15 @@ class MjpegStreamingEncoder(
                 val phys = camId.substringAfter(':', camId)
                 prefStringWithFallback(prefs, "camera_contrast_$camId", "camera_contrast_$phys")?.toIntOrNull() ?: 0
             } else 0
+            val isFrontCamera = camId?.startsWith("1") == true || camId?.contains("front", ignoreCase = true) == true
             val mirror = if (camId != null) {
                 val phys = camId.substringAfter(':', camId)
-                prefStringWithFallback(prefs, "mirror_$camId", "mirror_$phys")?.toBoolean() ?: false
-            } else false
+                prefStringWithFallback(prefs, "mirror_$camId", "mirror_$phys")?.toBoolean() ?: isFrontCamera
+            } else isFrontCamera
+
+            val crop = try { image.cropRect } catch (_: Throwable) { null }
+            val cropW = if (crop != null && crop.right > crop.left) ((crop.right - crop.left) / 2) * 2 else image.width
+            val cropH = if (crop != null && crop.bottom > crop.top) ((crop.bottom - crop.top) / 2) * 2 else image.height
 
             val nv21 = convertYUV420toNV21(image, nv21Buffer, nv21RowBuffer).also {
                 nv21Buffer = it
@@ -189,8 +194,8 @@ class MjpegStreamingEncoder(
             }
 
             var workingNv21 = nv21
-            var curW = image.width
-            var curH = image.height
+            var curW = cropW
+            var curH = cropH
 
             // Native zero-bitmap rotation (saves ~25ms CPU time & 8MB RAM per frame, keeping Tensor cool)
             if (totalRotation != 0) {

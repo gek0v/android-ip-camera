@@ -210,7 +210,10 @@ class CameraXCapture(
 
                 analysisUseCase = aBuilder.build()
                     .also { a -> a.setAnalyzer(analysisExec) { img ->
-                        width = img.width; height = img.height
+                        val crop = try { img.cropRect } catch (_: Throwable) { null }
+                        val cropW = if (crop != null && crop.right > crop.left) ((crop.right - crop.left) / 2) * 2 else img.width
+                        val cropH = if (crop != null && crop.bottom > crop.top) ((crop.bottom - crop.top) / 2) * 2 else img.height
+                        width = cropW; height = cropH
                         hasProducedFrame = true
                         onFrame(img)
                     } }
@@ -305,13 +308,16 @@ class CameraXCapture(
                         .build().also { sa ->
                             sa.setAnalyzer(newPipExec) { secImg ->
                                 try {
+                                    val crop = try { secImg.cropRect } catch (_: Throwable) { null }
+                                    val cropW = if (crop != null && crop.right > crop.left) ((crop.right - crop.left) / 2) * 2 else secImg.width
+                                    val cropH = if (crop != null && crop.bottom > crop.top) ((crop.bottom - crop.top) / 2) * 2 else secImg.height
                                     val nv21 = convertYUV420toNV21(secImg, secNv21Buffer, secNv21RowBuffer).also {
                                         secNv21Buffer = it
                                         if (secNv21RowBuffer == null || secNv21RowBuffer!!.size < secImg.planes[0].rowStride) {
                                             secNv21RowBuffer = ByteArray(secImg.planes[0].rowStride)
                                         }
                                     }
-                                    onPipFrameCallback?.invoke(nv21, secImg.width, secImg.height)
+                                    onPipFrameCallback?.invoke(nv21, cropW, cropH)
                                 } catch (e: Exception) {
                                     Log.e(TAG, "secAnalysis error: ${e.message}")
                                 } finally {
