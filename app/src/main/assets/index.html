@@ -575,7 +575,7 @@
     <div class="brand">
       <div class="brand-icon">📹</div>
       <h1>Android IP Camera</h1>
-      <span class="live-badge"><span class="live-dot"></span>MJPEG Live</span>
+      <span class="live-badge" id="liveBadge"><span class="live-dot" id="liveDot"></span><span id="liveBadgeText">⚡ WS Live</span></span>
     </div>
     <div class="header-actions">
       <button id="togglePreviewBtn" class="btn" title="Toggle camera video preview to save CPU / network">👁️ Hide Preview</button>
@@ -593,6 +593,7 @@
         <div class="status-item" id="wifiStatus" title="WiFi Signal">🛜 --%</div>
         <div class="status-item" id="batteryStatus" title="Battery Level">🔋 --%</div>
         <div class="status-item" id="fpsStatus" title="Stream Frame Rate">⚡ 0 fps</div>
+        <div class="status-item" id="latencyOverlayStatus" title="Glass-to-Glass Latency">⏱️ --ms</div>
       </div>
       <div id="streamLoading" class="stream-loading">
         <div class="spinner"></div>
@@ -622,16 +623,16 @@
         <!-- Direct Stream URL Card -->
         <section class="card">
           <div class="card-title">
-            <span>MJPEG Stream Link</span>
-            <span class="val-badge" id="resLiveBadge">Direct URL</span>
+            <span>Video Stream Links</span>
+            <span class="val-badge" id="resLiveBadge">Sub-20ms Pipeline</span>
           </div>
           <div class="stream-url-bar">
             <span class="stream-url-text" id="streamUrlText">Loading stream URL…</span>
             <button class="btn btn-copy" id="copyStreamBtn" onclick="copyStreamUrl()">📋 Copy</button>
           </div>
           <div class="grid-2">
-            <button class="btn" onclick="copyObsUrl()" title="Copy clean stream link designed for OBS Browser Source">🎥 Copy OBS Link</button>
-            <a id="openStreamLink" href="/video/mjpeg" target="_blank" class="btn" style="text-align:center;">↗ Open Stream</a>
+            <button class="btn" onclick="copyObsWsUrl()" title="Copy ultra-low latency WebSocket link for OBS Browser Source">⚡ Copy OBS WS</button>
+            <button class="btn" onclick="copyObsUrl()" title="Copy clean MJPEG link designed for OBS Browser Source">🎥 Copy OBS MJPEG</button>
           </div>
         </section>
 
@@ -649,6 +650,14 @@
             <div class="stat-box">
               <span class="stat-label">Throughput</span>
               <span class="stat-val" id="statBitrate">0.00 Mbps</span>
+            </div>
+            <div class="stat-box">
+              <span class="stat-label">Est. Latency</span>
+              <span class="stat-val" id="statLatency">-- ms</span>
+            </div>
+            <div class="stat-box">
+              <span class="stat-label">Transport</span>
+              <span class="stat-val" id="statTransport">WebSocket</span>
             </div>
             <div class="stat-box">
               <span class="stat-label">Frame Time</span>
@@ -949,6 +958,7 @@
       getEl('statBitrate').textContent = '0.00 Mbps';
       getEl('statFrameTime').textContent = '0.0 ms';
       getEl('statFrameSize').textContent = '0 KB';
+      const sLat = getEl('statLatency'); if (sLat) sLat.textContent = '-- ms';
       getEl('fpsBar').style.width = '0%';
       showToast('Telemetry counters reset');
     }
@@ -969,6 +979,16 @@
       if (streamUrlText) streamUrlText.textContent = url;
       const openLink = getEl('openStreamLink');
       if (openLink) openLink.href = url;
+    }
+
+    function copyObsWsUrl() {
+      const loc = window.location;
+      const url = loc.protocol + "//" + loc.host + "/ws/obs";
+      navigator.clipboard.writeText(url).then(() => {
+        showToast('OBS WebSocket Link copied to clipboard!');
+      }).catch(() => {
+        prompt('OBS WebSocket Source URL:', url);
+      });
     }
 
     function copyObsUrl() {
@@ -1009,42 +1029,282 @@
         controlsPanel.classList.add('full-view');
         togglePreviewBtn.textContent = '👁️ Show Preview';
         togglePreviewBtn.classList.add('active');
-        stopMjpegStream();
+        stopVideoStream();
       } else {
         streamContainer.classList.remove('hidden');
         controlsPanel.classList.remove('full-view');
         togglePreviewBtn.textContent = '👁️ Hide Preview';
         togglePreviewBtn.classList.remove('active');
-        startMjpegStream();
+        startVideoStream();
         requestAnimationFrame(() => applyCanvasSize(targetCanvasSize(lastDrawnBmp)));
       }
     }
 
     togglePreviewBtn.addEventListener('click', togglePreview);
 
-    // Ultra-Low Latency MJPEG streaming engine
-    function stopMjpegStream() {
-      if (mjpegAbort) {
-        try { mjpegAbort.abort(); } catch (_) {}
-        mjpegAbort = null;
+    // Ultra-Low Latency WebSocket & MJPEG Streaming Engine
+    let streamCtx = null;
+    function getStreamContext() {
+      if (!streamCtx && streamCanvas) {
+        streamCtx = streamCanvas.getContext('2d', { alpha: false, desynchronized: true });
       }
-      mjpegRunning = false;
+      return streamCtx;
+    }
+
+    function renderFrame(bmp) {
+      if (streamLoading) streamLoading.style.display = 'none';
+      const size = targetCanvasSize(bmp);
+      applyCanvasSize(size);
+
+      const ctx = getStreamContext();
+      if (!ctx) {
+        bmp.close();
+        return;
+      }
+
+      const w = size.w, h = size.h;
+      const iw = bmp.width, ih = bmp.height;
+      const scale = Math.min(w / iw, h / ih) * userScale;
+      const dw = Math.max(1, Math.floor(iw * scale));
+      const dh = Math.max(1, Math.floor(ih * scale));
+      const dx = Math.floor((w - dw) / 2);
+      const dy = Math.floor((h - dh) / 2);
+
+      ctx.fillStyle = '#000';
+      ctx.fillRect(0, 0, w, h);
+      ctx.drawImage(bmp, dx, dy, dw, dh);
+
+      if (lastDrawnBmp && lastDrawnBmp !== bmp) {
+        try { lastDrawnBmp.close(); } catch (_) {}
+      }
+      lastDrawnBmp = bmp;
+
+      totalFrames++;
+      frameCount++;
+      const now = performance.now();
+      lastFrameTimeMs = Math.round((now - lastFrameTimestamp) * 10) / 10;
+      lastFrameTimestamp = now;
+
+      if (now - lastFpsTime >= 1000) {
+        const durationSec = (now - lastFpsTime) / 1000.0;
+        currentFps = Math.round((frameCount / durationSec) * 10) / 10;
+        currentBitrateMbps = Math.round(((bytesThisInterval * 8) / (1024 * 1024 * durationSec)) * 100) / 100;
+        const avgKb = frameCount > 0 ? Math.round((bytesThisInterval / frameCount) / 1024) : 0;
+
+        const fpsEl = getEl('fpsStatus');
+        if (fpsEl) fpsEl.textContent = '⚡ ' + currentFps + ' fps';
+
+        const sFps = getEl('statFps');
+        if (sFps) sFps.textContent = currentFps + ' fps';
+        const sBr = getEl('statBitrate');
+        if (sBr) sBr.textContent = currentBitrateMbps + ' Mbps';
+        const sFt = getEl('statFrameTime');
+        if (sFt) sFt.textContent = lastFrameTimeMs + ' ms';
+        const sFs = getEl('statFrameSize');
+        if (sFs) sFs.textContent = avgKb + ' KB';
+        const sTot = getEl('statTotal');
+        if (sTot) sTot.textContent = '' + totalFrames;
+        const sBar = getEl('fpsBar');
+        if (sBar) {
+          const pct = Math.min(100, Math.round((currentFps / 30) * 100));
+          sBar.style.width = pct + '%';
+        }
+
+        frameCount = 0;
+        bytesThisInterval = 0;
+        lastFpsTime = now;
+      }
+      setStreamResolution(iw, ih);
+    }
+
+    let streamActive = false;
+    let currentTransport = 'ws';
+    let ws = null;
+    let wsConnecting = false;
+    let wsConnectTimeout = null;
+    let mjpegAbort = null;
+    let mjpegRunning = false;
+
+    function updateTransportUI(transport) {
+      currentTransport = transport;
+      const liveBadgeText = getEl('liveBadgeText');
+      const liveDot = getEl('liveDot');
+      const statTransport = getEl('statTransport');
+      if (transport === 'ws') {
+        if (liveBadgeText) liveBadgeText.textContent = '⚡ WS Live';
+        if (liveDot) liveDot.style.background = '#00e676';
+        if (statTransport) statTransport.textContent = 'WebSocket (Binary)';
+      } else {
+        if (liveBadgeText) liveBadgeText.textContent = 'MJPEG Live';
+        if (liveDot) liveDot.style.background = '#ff5252';
+        if (statTransport) statTransport.textContent = 'HTTP MJPEG';
+        const sLat = getEl('statLatency');
+        if (sLat) sLat.textContent = 'N/A (MJPEG)';
+        const ovLat = getEl('latencyOverlayStatus');
+        if (ovLat) ovLat.textContent = '⏱️ MJPEG';
+      }
+    }
+
+    function updateLatencyDisplay(latencyMs) {
+      const sLat = getEl('statLatency');
+      if (sLat) sLat.textContent = latencyMs + ' ms';
+      const ovLat = getEl('latencyOverlayStatus');
+      if (ovLat) ovLat.textContent = '⚡ ' + latencyMs + ' ms';
+    }
+
+    function stopVideoStream() {
+      streamActive = false;
+      stopWebSocketStream();
+      stopMjpegStream();
       if (lastDrawnBmp) {
         try { lastDrawnBmp.close(); } catch (_) {}
         lastDrawnBmp = null;
       }
     }
 
-    function startMjpegStream() {
+    function stopWebSocketStream() {
+      if (wsConnectTimeout) {
+        clearTimeout(wsConnectTimeout);
+        wsConnectTimeout = null;
+      }
+      wsConnecting = false;
+      if (ws) {
+        try {
+          ws.onopen = null;
+          ws.onmessage = null;
+          ws.onerror = null;
+          ws.onclose = null;
+          ws.close();
+        } catch (_) {}
+        ws = null;
+      }
+    }
+
+    function stopMjpegStream() {
+      if (mjpegAbort) {
+        try { mjpegAbort.abort(); } catch (_) {}
+        mjpegAbort = null;
+      }
+      mjpegRunning = false;
+    }
+
+    function startVideoStream() {
       if (isPreviewHidden || !streamCanvas) return;
+      stopVideoStream();
+      streamActive = true;
+      streamLoading.style.display = 'flex';
+
+      // Connect to ultra-low latency WebSocket stream first
+      startWebSocketStream();
+    }
+
+    function startWebSocketStream() {
+      if (!streamActive || isPreviewHidden) return;
+      stopWebSocketStream();
+      stopMjpegStream();
+      wsConnecting = true;
+
+      const loc = window.location;
+      const wsProto = loc.protocol === 'https:' ? 'wss:' : 'ws:';
+      const wsUrl = wsProto + '//' + loc.host + '/ws/video' + loc.search;
+
+      try {
+        ws = new WebSocket(wsUrl);
+        ws.binaryType = 'arraybuffer';
+      } catch (err) {
+        console.warn('WebSocket init failed, fallback to MJPEG:', err);
+        fallbackToMjpeg();
+        return;
+      }
+
+      wsConnectTimeout = setTimeout(() => {
+        if (wsConnecting && streamActive) {
+          console.warn('WebSocket connection timeout, falling back to MJPEG');
+          fallbackToMjpeg();
+        }
+      }, 3500);
+
+      ws.onopen = () => {
+        if (!streamActive) {
+          stopWebSocketStream();
+          return;
+        }
+        wsConnecting = false;
+        if (wsConnectTimeout) {
+          clearTimeout(wsConnectTimeout);
+          wsConnectTimeout = null;
+        }
+        updateTransportUI('ws');
+        console.log('⚡ Connected to ultra-low latency WebSocket (/ws/video)');
+      };
+
+      ws.onmessage = (event) => {
+        if (!streamActive || isPreviewHidden) return;
+        const data = event.data;
+        if (!(data instanceof ArrayBuffer) || data.byteLength < 18) return;
+
+        // Parse 18-byte video header: [Timestamp 8B][FrameIndex 4B][Flags 2B][PayloadLength 4B]
+        const view = new DataView(data);
+        const tsHigh = view.getUint32(0);
+        const tsLow = view.getUint32(4);
+        const serverTs = tsHigh * 4294967296 + tsLow;
+        const frameIndex = view.getUint32(8);
+        const flags = view.getUint16(12);
+        const payloadLength = view.getUint32(14);
+
+        if (serverTs > 0) {
+          const now = Date.now();
+          const latency = now - serverTs;
+          if (latency >= 0 && latency < 60000) {
+            updateLatencyDisplay(latency);
+          } else if (latency < 0 && latency > -1000) {
+            updateLatencyDisplay(0);
+          }
+        }
+
+        const jpegBytes = new Uint8Array(data, 18, payloadLength);
+        bytesThisInterval += data.byteLength;
+
+        const blob = new Blob([jpegBytes], { type: 'image/jpeg' });
+        createImageBitmap(blob).then(bmp => {
+          if (streamActive && currentTransport === 'ws') {
+            requestAnimationFrame(() => renderFrame(bmp));
+          } else {
+            bmp.close();
+          }
+        }).catch(() => {});
+      };
+
+      ws.onerror = (err) => {
+        console.warn('WebSocket error, falling back to MJPEG:', err);
+        if (streamActive && wsConnecting) {
+          fallbackToMjpeg();
+        }
+      };
+
+      ws.onclose = (event) => {
+        if (streamActive && currentTransport === 'ws') {
+          console.warn('WebSocket closed, falling back to MJPEG:', event.code);
+          fallbackToMjpeg();
+        }
+      };
+    }
+
+    function fallbackToMjpeg() {
+      if (!streamActive) return;
+      stopWebSocketStream();
+      updateTransportUI('mjpeg');
+      startMjpegStream();
+    }
+
+    function startMjpegStream() {
+      if (!streamActive || isPreviewHidden || !streamCanvas) return;
       stopMjpegStream();
 
       const controller = new AbortController();
       mjpegAbort = controller;
       mjpegRunning = true;
       streamLoading.style.display = 'flex';
-
-      const ctx = streamCanvas.getContext('2d', { alpha: false, desynchronized: true });
 
       fetch('/video/mjpeg', {
         cache: 'no-store',
@@ -1069,66 +1329,6 @@
           return -1;
         }
 
-        function renderFrame(bmp) {
-          streamLoading.style.display = 'none';
-          const size = targetCanvasSize(bmp);
-          applyCanvasSize(size);
-
-          const w = size.w, h = size.h;
-          const iw = bmp.width, ih = bmp.height;
-          const scale = Math.min(w / iw, h / ih) * userScale;
-          const dw = Math.max(1, Math.floor(iw * scale));
-          const dh = Math.max(1, Math.floor(ih * scale));
-          const dx = Math.floor((w - dw) / 2);
-          const dy = Math.floor((h - dh) / 2);
-
-          ctx.fillStyle = '#000';
-          ctx.fillRect(0, 0, w, h);
-          ctx.drawImage(bmp, dx, dy, dw, dh);
-
-          if (lastDrawnBmp && lastDrawnBmp !== bmp) {
-            try { lastDrawnBmp.close(); } catch (_) {}
-          }
-          lastDrawnBmp = bmp;
-
-          totalFrames++;
-          frameCount++;
-          const now = performance.now();
-          lastFrameTimeMs = Math.round((now - lastFrameTimestamp) * 10) / 10;
-          lastFrameTimestamp = now;
-
-          if (now - lastFpsTime >= 1000) {
-            const durationSec = (now - lastFpsTime) / 1000.0;
-            currentFps = Math.round((frameCount / durationSec) * 10) / 10;
-            currentBitrateMbps = Math.round(((bytesThisInterval * 8) / (1024 * 1024 * durationSec)) * 100) / 100;
-            const avgKb = frameCount > 0 ? Math.round((bytesThisInterval / frameCount) / 1024) : 0;
-
-            const fpsEl = getEl('fpsStatus');
-            if (fpsEl) fpsEl.textContent = `⚡ ${currentFps} fps`;
-
-            const sFps = getEl('statFps');
-            if (sFps) sFps.textContent = `${currentFps} fps`;
-            const sBr = getEl('statBitrate');
-            if (sBr) sBr.textContent = `${currentBitrateMbps} Mbps`;
-            const sFt = getEl('statFrameTime');
-            if (sFt) sFt.textContent = `${lastFrameTimeMs} ms`;
-            const sFs = getEl('statFrameSize');
-            if (sFs) sFs.textContent = `${avgKb} KB`;
-            const sTot = getEl('statTotal');
-            if (sTot) sTot.textContent = `${totalFrames}`;
-            const sBar = getEl('fpsBar');
-            if (sBar) {
-              const pct = Math.min(100, Math.round((currentFps / 30) * 100));
-              sBar.style.width = `${pct}%`;
-            }
-
-            frameCount = 0;
-            bytesThisInterval = 0;
-            lastFpsTime = now;
-          }
-          setStreamResolution(iw, ih);
-        }
-
         function process() {
           while (true) {
             const soi = findMarker(buffer, 0xD8);
@@ -1143,8 +1343,11 @@
             bytesThisInterval += frameBytes.length;
             const blob = new Blob([frameBytes], { type: 'image/jpeg' });
             createImageBitmap(blob).then(bmp => {
-              if (mjpegRunning) renderFrame(bmp);
-              else bmp.close();
+              if (streamActive && currentTransport === 'mjpeg') {
+                requestAnimationFrame(() => renderFrame(bmp));
+              } else {
+                bmp.close();
+              }
             }).catch(() => {});
           }
         }
@@ -1164,7 +1367,7 @@
       }).catch(err => {
         if (err.name !== 'AbortError') {
           console.error('MJPEG stream error:', err);
-          setTimeout(() => { if (mjpegRunning) startMjpegStream(); }, 2000);
+          setTimeout(() => { if (streamActive && currentTransport === 'mjpeg') startMjpegStream(); }, 2000);
         }
       });
     }
