@@ -1626,6 +1626,7 @@ class StreamingServerHelper(
         val pipEnabled: Boolean,
         val pipPosition: String,
         val pipSize: String,
+        val hasConcurrentCameras: Boolean = false,
     )
 
     private data class DeviceInfo(
@@ -1699,7 +1700,9 @@ class StreamingServerHelper(
                 put("pipEnabled", settings.pipEnabled)
                 put("pipPosition", settings.pipPosition)
                 put("pipSize", settings.pipSize)
+                put("hasConcurrentCameras", settings.hasConcurrentCameras)
             })
+            put("hasConcurrentCameras", settings.hasConcurrentCameras)
             put("appVersion", context.packageManager.getPackageInfo(context.packageName, 0).versionName.orEmpty())
         }.toString()
     }
@@ -1854,6 +1857,7 @@ class StreamingServerHelper(
             pipEnabled = prefs.getBoolean("pip_enabled", false),
             pipPosition = prefs.getString("pip_position", "top-right") ?: "top-right",
             pipSize = prefs.getString("pip_size", "0.28") ?: "0.28",
+            hasConcurrentCameras = hasConcurrentCameraSupport(context),
         )
     }
 
@@ -2137,6 +2141,21 @@ class StreamingServerHelper(
             val host = client.socket.inetAddress?.hostAddress ?: "unknown"
             onLog("Removing expired/stalled " + authStatus + " connection from " + host)
             removeClient(client)
+        }
+    }
+
+    companion object {
+        fun hasConcurrentCameraSupport(context: Context): Boolean = try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                val cm = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
+                cm.concurrentCameraIds.isNotEmpty()
+            } else {
+                context.packageManager.hasSystemFeature(PackageManager.FEATURE_CAMERA_CONCURRENT)
+            }
+        } catch (_: Throwable) {
+            try {
+                context.packageManager.hasSystemFeature(PackageManager.FEATURE_CAMERA_CONCURRENT)
+            } catch (_: Throwable) { false }
         }
     }
 }

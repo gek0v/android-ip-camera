@@ -35,6 +35,7 @@ import androidx.camera.core.resolutionselector.ResolutionStrategy
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.LifecycleOwner
+import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 
@@ -75,6 +76,9 @@ class CameraXCapture(
     private var boundSelector: CameraSelector? = null
     private var analysisUseCase: ImageAnalysis? = null
     private var secondaryAnalysisUseCase: ImageAnalysis? = null
+    private var pipExec: ExecutorService? = null
+    private var secNv21Buffer: ByteArray? = null
+    private var secNv21RowBuffer: ByteArray? = null
     @Volatile private var onPipFrameCallback: ((ByteArray, Int, Int) -> Unit)? = null
 
     fun setPipFrameCallback(cb: ((ByteArray, Int, Int) -> Unit)?) {
@@ -82,8 +86,15 @@ class CameraXCapture(
     }
 
     fun hasConcurrentSupport(): Boolean = try {
-        provider?.availableConcurrentCameraInfos?.isNotEmpty() == true
-    } catch (_: Throwable) { false }
+        val available = provider?.availableConcurrentCameraInfos
+        if (available != null) {
+            available.isNotEmpty()
+        } else {
+            StreamingServerHelper.hasConcurrentCameraSupport(ctx)
+        }
+    } catch (_: Throwable) {
+        StreamingServerHelper.hasConcurrentCameraSupport(ctx)
+    }
     private var previewUseCase: Preview? = null
     private var encoderUseCase: Preview? = null
     @Volatile private var released = false
@@ -253,39 +264,85 @@ class CameraXCapture(
 
         if (canDoConcurrent) {
             try {
-                p.unbindAll()
-                val primaryGroup = UseCaseGroup.Builder().addUseCase(analysis).apply {
-                    previewUseCase?.let { addUseCase(it) }
-                }.build()
+                val availableCombos = p.availableConcurrentCameraInfos
+                val chosenCombo = availableCombos.firstOrNull { combo ->
+                    val hasFront = combo.any { it.lensFacing == CameraSelector.LENS_FACING_FRONT }
+                    val hasBack = combo.any { it.lensFacing == CameraSelector.LENS_FACING_BACK }
+                    hasFront && hasBack
+                } ?: availableCombos.firstOrNull()
 
-                val secSel = if (front) CameraSelector.DEFAULT_BACK_CAMERA else CameraSelector.DEFAULT_FRONT_CAMERA
-                val secAnalysis = ImageAnalysis.Builder()
-                    .setResolutionSelector(ResolutionSelector.Builder()
-                        .setResolutionStrategy(ResolutionStrategy(Size(640, 480), ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER_THEN_LOWER))
-                        .build())
-                    .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-                    .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_YUV_420_888)
-                    .build().also { sa ->
-                        sa.setAnalyzer(analysisExec) { secImg ->
-                            try {
-                                val nv21 = convertYUV420toNV21(secImg)
-                                onPipFrameCallback?.invoke(nv21, secImg.width, secImg.height)
-                            } finally {
-                                secImg.close()
+                if (chosenCombo != null && chosenCombo.size >= 2) {
+                    p.unbindAll()
+                    val targetLensFacing = if (front) CameraSelector.LENS_FACING_FRONT else CameraSelector.LENS_FACING_BACK
+                    val primaryCamInfo = logicalCameraId?.let { reqId ->
+                        chosenCombo.firstOrNull {
+                            try { Camera2CameraInfo.from(it).cameraId == reqId } catch (_: Throwable) { false }
+                        }
+                    } ?: chosenCombo.firstOrNull { it.lensFacing == targetLensFacing }
+                      ?: chosenCombo[0]
+
+                    val secondaryCamInfo = chosenCombo.firstOrNull { it != primaryCamInfo }
+                      ?: chosenCombo[1]
+
+                    val primarySel = primaryCamInfo.cameraSelector
+                    val secondarySel = secondaryCamInfo.cameraSelector
+
+                    val primaryGroup = UseCaseGroup.Builder().addUseCase(analysis).apply {
+                        previewUseCase?.let { addUseCase(it) }
+                    }.build()
+
+                    pipExec?.shutdown()
+                    val newPipExec = Executors.newSingleThreadExecutor()
+                    pipExec = newPipExec
+
+                    val secAnalysis = ImageAnalysis.Builder()
+                        .setResolutionSelector(ResolutionSelector.Builder()
+                            .setResolutionStrategy(ResolutionStrategy(Size(640, 480), ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER_THEN_LOWER))
+                            .build())
+                        .setTargetRotation(Surface.ROTATION_0)
+                        .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                        .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_YUV_420_888)
+                        .build().also { sa ->
+                            sa.setAnalyzer(newPipExec) { secImg ->
+                                try {
+                                    val nv21 = convertYUV420toNV21(secImg, secNv21Buffer, secNv21RowBuffer).also {
+                                        secNv21Buffer = it
+                                        if (secNv21RowBuffer == null || secNv21RowBuffer!!.size < secImg.planes[0].rowStride) {
+                                            secNv21RowBuffer = ByteArray(secImg.planes[0].rowStride)
+                                        }
+                                    }
+                                    onPipFrameCallback?.invoke(nv21, secImg.width, secImg.height)
+                                } catch (e: Exception) {
+                                    Log.e(TAG, "secAnalysis error: ${e.message}")
+                                } finally {
+                                    secImg.close()
+                                }
                             }
                         }
-                    }
-                secondaryAnalysisUseCase = secAnalysis
-                val secondaryGroup = UseCaseGroup.Builder().addUseCase(secAnalysis).build()
+                    secondaryAnalysisUseCase = secAnalysis
+                    val secondaryGroup = UseCaseGroup.Builder().addUseCase(secAnalysis).build()
 
-                val primaryConfig = ConcurrentCamera.SingleCameraConfig(sel, primaryGroup, owner)
-                val secondaryConfig = ConcurrentCamera.SingleCameraConfig(secSel, secondaryGroup, owner)
-                p.bindToLifecycle(listOf(primaryConfig, secondaryConfig))
-                Log.i(TAG, "Successfully bound Dual Concurrent Cameras for PiP mode")
-                return
+                    val primaryConfig = ConcurrentCamera.SingleCameraConfig(primarySel, primaryGroup, owner)
+                    val secondaryConfig = ConcurrentCamera.SingleCameraConfig(secondarySel, secondaryGroup, owner)
+                    val concurrentCamera = p.bindToLifecycle(listOf(primaryConfig, secondaryConfig))
+                    camera = concurrentCamera.cameras.firstOrNull()
+                    encoderSurfaceBound = false
+                    Log.i(TAG, "Successfully bound Dual Concurrent Cameras for PiP mode: primary facing=${primaryCamInfo.lensFacing}, secondary facing=${secondaryCamInfo.lensFacing}")
+                    reapplyControls()
+                    return
+                } else {
+                    Log.w(TAG, "Concurrent camera combinations list is empty or insufficient: $availableCombos")
+                }
             } catch (e: Exception) {
-                Log.w(TAG, "Concurrent camera binding failed, falling back to single camera: ${e.message}")
+                Log.w(TAG, "Concurrent camera binding failed, falling back to single camera: ${e.message}", e)
+                try { pipExec?.shutdown() } catch (_: Exception) {}
+                pipExec = null
+                secondaryAnalysisUseCase = null
             }
+        } else {
+            try { pipExec?.shutdown() } catch (_: Exception) {}
+            pipExec = null
+            secondaryAnalysisUseCase = null
         }
         val cases = mutableListOf<androidx.camera.core.UseCase>()
         previewUseCase?.let { cases.add(it) }
@@ -344,7 +401,10 @@ class CameraXCapture(
                 }
             }
         }
-        // Re-apply cached controls, since rebinding replaces the camera control.
+        reapplyControls()
+    }
+
+    private fun reapplyControls() {
         val cc = camera?.cameraControl
         if (torchEnabled && hasFlashUnit) try { cc?.enableTorch(true) } catch (_: Exception) {}
         zoomRatio?.let { applyZoomWithRetry(it) }
@@ -607,6 +667,9 @@ class CameraXCapture(
         mainHandler.removeCallbacksAndMessages(null)
         try { provider?.unbindAll() } catch (_: Exception) {}
         try { analysisExec.shutdown() } catch (_: Exception) {}
+        try { pipExec?.shutdown() } catch (_: Exception) {}
+        pipExec = null
+        secondaryAnalysisUseCase = null
         provider = null; camera = null; imageCapture = null
     }
 

@@ -65,19 +65,24 @@ class MjpegStreamingEncoder(
     private var mirroredNv21Buffer: ByteArray? = null
 
     // Secondary camera frame buffer for Picture-in-Picture (Dual Camera mode)
-    @Volatile private var pipNv21Buffer: ByteArray? = null
+    private val pipLock = Any()
+    private var pipNv21Buffer: ByteArray? = null
+    private var pipNv21WorkBuffer: ByteArray? = null
+    private var pipRotatedBuffer: ByteArray? = null
     @Volatile private var pipWidth: Int = 0
     @Volatile private var pipHeight: Int = 0
     @Volatile private var pipFrameTime: Long = 0L
 
     fun updatePipFrame(nv21: ByteArray, width: Int, height: Int) {
-        if (pipNv21Buffer == null || pipNv21Buffer!!.size != nv21.size) {
-            pipNv21Buffer = ByteArray(nv21.size)
+        synchronized(pipLock) {
+            if (pipNv21Buffer == null || pipNv21Buffer!!.size != nv21.size) {
+                pipNv21Buffer = ByteArray(nv21.size)
+            }
+            System.arraycopy(nv21, 0, pipNv21Buffer!!, 0, nv21.size)
+            pipWidth = width
+            pipHeight = height
+            pipFrameTime = System.currentTimeMillis()
         }
-        System.arraycopy(nv21, 0, pipNv21Buffer!!, 0, nv21.size)
-        pipWidth = width
-        pipHeight = height
-        pipFrameTime = System.currentTimeMillis()
     }
 
     // Closed-loop rate control for bitrate limit
@@ -207,11 +212,42 @@ class MjpegStreamingEncoder(
             }
 
             val pipEnabled = prefs.getBoolean("pip_enabled", false)
-            if (pipEnabled && pipNv21Buffer != null && (System.currentTimeMillis() - pipFrameTime) < 3000L) {
-                val pipPos = prefs.getString("pip_position", "top-right") ?: "top-right"
-                val pipSizeStr = prefs.getString("pip_size", "0.28") ?: "0.28"
-                val pipScale = pipSizeStr.toFloatOrNull() ?: 0.28f
-                overlayNv21Pip(workingNv21, curW, curH, pipNv21Buffer!!, pipWidth, pipHeight, pipPos, pipScale)
+            if (pipEnabled) {
+                var pBuf: ByteArray? = null
+                var pW = 0
+                var pH = 0
+                synchronized(pipLock) {
+                    val buf = pipNv21Buffer
+                    if (buf != null && (System.currentTimeMillis() - pipFrameTime) < 3000L && pipWidth > 0 && pipHeight > 0) {
+                        if (pipNv21WorkBuffer == null || pipNv21WorkBuffer!!.size != buf.size) {
+                            pipNv21WorkBuffer = ByteArray(buf.size)
+                        }
+                        System.arraycopy(buf, 0, pipNv21WorkBuffer!!, 0, buf.size)
+                        pBuf = pipNv21WorkBuffer
+                        pW = pipWidth
+                        pH = pipHeight
+                    }
+                }
+                if (pBuf != null) {
+                    var activePipBuf = pBuf
+                    var activePipW = pW
+                    var activePipH = pH
+
+                    if (totalRotation != 0) {
+                        if (pipRotatedBuffer == null || pipRotatedBuffer!!.size != activePipBuf.size) {
+                            pipRotatedBuffer = ByteArray(activePipBuf.size)
+                        }
+                        val (rW, rH) = rotateNV21(activePipBuf, activePipW, activePipH, totalRotation, pipRotatedBuffer!!)
+                        activePipBuf = pipRotatedBuffer!!
+                        activePipW = rW
+                        activePipH = rH
+                    }
+
+                    val pipPos = prefs.getString("pip_position", "top-right") ?: "top-right"
+                    val pipSizeStr = prefs.getString("pip_size", "0.28") ?: "0.28"
+                    val pipScale = pipSizeStr.toFloatOrNull() ?: 0.28f
+                    overlayNv21Pip(workingNv21, curW, curH, activePipBuf, activePipW, activePipH, pipPos, pipScale)
+                }
             }
 
             val quality = resolveQuality(prefs, fpsCoerced)
@@ -294,11 +330,42 @@ class MjpegStreamingEncoder(
             }
 
             val pipEnabled = prefs.getBoolean("pip_enabled", false)
-            if (pipEnabled && pipNv21Buffer != null && (System.currentTimeMillis() - pipFrameTime) < 3000L) {
-                val pipPos = prefs.getString("pip_position", "top-right") ?: "top-right"
-                val pipSizeStr = prefs.getString("pip_size", "0.28") ?: "0.28"
-                val pipScale = pipSizeStr.toFloatOrNull() ?: 0.28f
-                overlayNv21Pip(workingNv21, curW, curH, pipNv21Buffer!!, pipWidth, pipHeight, pipPos, pipScale)
+            if (pipEnabled) {
+                var pBuf: ByteArray? = null
+                var pW = 0
+                var pH = 0
+                synchronized(pipLock) {
+                    val buf = pipNv21Buffer
+                    if (buf != null && (System.currentTimeMillis() - pipFrameTime) < 3000L && pipWidth > 0 && pipHeight > 0) {
+                        if (pipNv21WorkBuffer == null || pipNv21WorkBuffer!!.size != buf.size) {
+                            pipNv21WorkBuffer = ByteArray(buf.size)
+                        }
+                        System.arraycopy(buf, 0, pipNv21WorkBuffer!!, 0, buf.size)
+                        pBuf = pipNv21WorkBuffer
+                        pW = pipWidth
+                        pH = pipHeight
+                    }
+                }
+                if (pBuf != null) {
+                    var activePipBuf = pBuf
+                    var activePipW = pW
+                    var activePipH = pH
+
+                    if (totalRotation != 0) {
+                        if (pipRotatedBuffer == null || pipRotatedBuffer!!.size != activePipBuf.size) {
+                            pipRotatedBuffer = ByteArray(activePipBuf.size)
+                        }
+                        val (rW, rH) = rotateNV21(activePipBuf, activePipW, activePipH, totalRotation, pipRotatedBuffer!!)
+                        activePipBuf = pipRotatedBuffer!!
+                        activePipW = rW
+                        activePipH = rH
+                    }
+
+                    val pipPos = prefs.getString("pip_position", "top-right") ?: "top-right"
+                    val pipSizeStr = prefs.getString("pip_size", "0.28") ?: "0.28"
+                    val pipScale = pipSizeStr.toFloatOrNull() ?: 0.28f
+                    overlayNv21Pip(workingNv21, curW, curH, activePipBuf, activePipW, activePipH, pipPos, pipScale)
+                }
             }
 
             val quality = resolveQuality(prefs, fpsCoerced)

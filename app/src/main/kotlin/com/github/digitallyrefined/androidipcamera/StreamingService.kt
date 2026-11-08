@@ -982,9 +982,13 @@ class StreamingService : LifecycleService() {
                 }
             }
             "pip_enabled" -> {
-                val enabled = value.equals("true", ignoreCase = true) || value == "1"
+                val supported = StreamingServerHelper.hasConcurrentCameraSupport(this)
+                val enabled = (value.equals("true", ignoreCase = true) || value == "1") && supported
                 prefs.edit().putBoolean("pip_enabled", enabled).apply()
-                mjpegStreamingEncoder?.handleRemoteControl(key, value)
+                mjpegStreamingEncoder?.handleRemoteControl(key, enabled.toString())
+                if (!supported && (value.equals("true", ignoreCase = true) || value == "1")) {
+                    Log.w(TAG, "pip_enabled ignored: device hardware does not support simultaneous dual cameras")
+                }
                 launchMain { debouncedStartCamera(force = true) }
             }
             "pip_position", "pip_size" -> {
