@@ -19,3 +19,6 @@ certificates
 
 # local build helpers (machine-specific paths)
 _wsl_*.sh
+
+# Git worktrees
+.worktrees/
